@@ -1,0 +1,3 @@
+# Bytes in this repository are exact. The forked packages must match their upstream
+# commits byte for byte, and pmmp-core builds its image from a Windows checkout.
+* -text

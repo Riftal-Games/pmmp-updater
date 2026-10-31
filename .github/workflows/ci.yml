@@ -1,0 +1,43 @@
+name: CI
+
+# Pull requests gate every merge. Pushes are watched on main only, so a branch push
+# and its pull request do not run twice for the same commit.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tools:
+    name: tools and skills
+    runs-on: [self-hosted, linux, riftal]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      # Mojang docs tags are cached under the runner user's ~/.cache, outside the
+      # workspace, and reused across runs rather than re-cloned.
+      - name: Node version
+        run: |
+          node --version
+          node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'
+
+      - name: Skills keep the shared failure block
+        run: node tools/skills-lint/lint.js
+
+      - name: Tool tests
+        run: node --test "tools/**/*.test.js"
+
+      # Against Mojang's published docs, so a change in how Mojang lays out a tag
+      # fails here before it fails a version run.
+      - name: Live docs check
+        env:
+          RIFTAL_LIVE: "1"
+        run: node --test --test-name-pattern=live "tools/**/*.test.js"

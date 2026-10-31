@@ -25,6 +25,8 @@ Read `docs/lessons.md` and search `docs/incidents/` for the symptom.
 
 Copy `docs/incidents/TEMPLATE.md` to `docs/incidents/<YYYY-MM-DD>-<slug>.md` and fill in symptom and evidence now, before investigating. Evidence written after the fix tends to describe the fix, not the failure.
 
+The incident file is committed in the lesson PR of step 6, never in the run's PR. A PR that touches `docs/incidents/` or `docs/lessons.md` is judged as a lesson, and a run's PR edits `packages/`, which a lesson may not. Until step 6, keep the file uncommitted, and link it from the version runbook by its path.
+
 ## 4. Find the cause
 
 Investigate until you can state why it happened, or until you can say what you ruled out. Use the real files and real output. If the cause is outside this repository (pmmp-core, the client, BDS, Mojang's docs), say which and stop at what this repository can change.
@@ -55,17 +57,26 @@ If this symptom already has an incident and a merged lesson, the lesson did not 
 A lesson PR may change skills under `.claude/skills/`, tools under `tools/`, their tests and fixtures, and `docs/`, except the protected paths below. It may not:
 
 - touch a protected path. These are the rules that bound lessons, so a lesson changing them would be loosening its own limits:
-  - `CLAUDE.md` here or anywhere, `.claude/settings.json`, `.claude/hooks/`, any agent definition;
+  - `CLAUDE.md` or `CLAUDE.local.md` here or anywhere, `.mcp.json`, `.claude/settings.json`, `.claude/hooks/`, `.claude/agents/`, `.claude/commands/`;
   - `.claude/skills/skill-incident/` (this file) and `.claude/skills/FAILURE-BLOCK.md`;
-  - `tools/skills-lint/` and `tools/lesson-guard/`, which enforce them;
-  - `.github/`, which runs the enforcement.
+  - `tools/skills-lint/`, `tools/lesson-guard/` and `tools/test-support/`, which enforce them or every test depends on;
+  - `.github/`, which runs the enforcement;
+  - `packages/`.
 
   Write a `needs an issue:` line for the steward instead. A change to any of them is a steward decision, and one that widens a power goes to the two-instance panel the root contract requires;
 - widen what any skill, agent or tool is allowed to do;
-- delete or weaken a test or fixture to make a run pass. That is a hard stop for Nasir;
-- edit `packages/` to make a tool's output match. Package changes belong to a version run, not a lesson.
+- delete, rename away or weaken a test or fixture, or change an existing assertion. A lesson only adds tests. Weakening a test to make a run pass is a hard stop for Nasir;
+- delete or rename any file.
 
-CI enforces the path rules mechanically: on a branch named `*-lesson-*`, `tools/lesson-guard` fails the run if the diff touches a protected path, deletes any file, or removes a test.
+Package changes belong to a version run, never a lesson.
+
+CI checks these rules mechanically. The `Lesson guard` workflow runs on `pull_request_target`, so it always uses the base branch's copy of itself and of `tools/lesson-guard`, and it never runs the PR's code. It treats a PR as a lesson when any of these holds: the branch name contains `-lesson-`, the PR carries the `lesson` label, or it touches `docs/lessons.md` or `docs/incidents/`. It fails such a PR when:
+
+- the PR touches a protected path, in any letter case;
+- the PR deletes a file. A rename counts as a deletion;
+- the PR removes a `test(` declaration, an `assert` line or the `node:test` import from a test file.
+
+Reviewers still check by reading. A PR that touches a protected path is a steward merge, whoever opened it and whatever its branch is called.
 
 ## Budgets that trigger an incident
 

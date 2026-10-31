@@ -75,10 +75,25 @@ test('renumbered enum values nested inside a schema are a wire change', () => {
 test('enum values published for the first time out of index order are flagged for a check', () => {
 	const plain = { type: 'string', enum: ['A', 'B', 'C'] };
 	assert.equal(docs.classify(plain, { ...plain, 'x-enum-binary-value': [0, 1, 2] }), 'annotation');
-	assert.equal(docs.classify(plain, { ...plain, 'x-enum-binary-value': [0, 1, 5] }), 'values-first-published');
+	assert.equal(docs.classify(plain, { ...plain, 'x-enum-binary-value': [0, 1, 5] }), 'values-to-check');
 	const nestedPlain = { type: 'object', properties: { Kind: plain } };
 	const nestedValued = { type: 'object', properties: { Kind: { ...plain, 'x-enum-binary-value': [2, 4, 8] } } };
-	assert.equal(docs.classify(nestedPlain, nestedValued), 'values-first-published');
+	assert.equal(docs.classify(nestedPlain, nestedValued), 'values-to-check');
+});
+
+test('enum values that stop being published out of index order are flagged for a check', () => {
+	const plain = { type: 'string', enum: ['A', 'B'] };
+	assert.equal(docs.classify({ ...plain, 'x-enum-binary-value': [0, 7] }, plain), 'values-to-check');
+	assert.equal(docs.classify({ ...plain, 'x-enum-binary-value': [0, 1] }, plain), 'annotation');
+});
+
+test('fields named like schema keywords are compared as fields', () => {
+	const withField = (name) => ({ type: 'object', properties: { Count: { type: 'integer' }, [name]: { type: 'string' } } });
+	const base = { type: 'object', properties: { Count: { type: 'integer' } } };
+	assert.equal(docs.classify(base, withField('description')), 'wire');
+	assert.equal(docs.classify(base, withField('$schema')), 'wire');
+	assert.equal(docs.classify(base, withField('x-enum-binary-value')), 'wire');
+	assert.equal(docs.classify(base, { ...base, description: 'prose' }), 'annotation');
 });
 
 test('finds new developer notes in subdirectories', () => {

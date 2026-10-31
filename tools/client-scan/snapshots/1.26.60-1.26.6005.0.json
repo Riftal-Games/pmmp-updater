@@ -1,5 +1,5 @@
 {
-	"scanned_at": "2026-10-31T21:10:28.523Z",
+	"scanned_at": "2026-10-31T21:29:41.188Z",
 	"client": {
 		"path": "C:\\XboxGames\\Minecraft for Windows\\Content",
 		"package_version": "1.26.6005.0",
@@ -722,5 +722,5 @@
 		},
 		"introduced": {}
 	},
-	"verdict": "CURRENT: our packages speak the client's protocol and version"
+	"verdict": "CORE BEHIND: our packages speak the client's protocol 2225, but the pmmp-core checkout builds 1.26.50; players cannot join until pmmp-core consumes these packages"
 }

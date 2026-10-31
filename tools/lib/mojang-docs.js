@@ -75,39 +75,41 @@ function checkout(tag) {
 	return dir;
 }
 
-function stable(value) {
-	if (Array.isArray(value)) return value.map(stable);
-	if (value && typeof value === 'object') {
-		const out = {};
-		for (const k of Object.keys(value).sort()) if (!VOLATILE_KEYS.has(k)) out[k] = stable(value[k]);
-		return out;
-	}
-	return value;
-}
-
-// Strips prose and enum value annotations so two schemas compare equal when only their
-// documentation differs. Explicit enum values are compared separately by classify,
-// because Mojang began publishing them for enums whose values were already fixed.
-function wire(value) {
-	if (Array.isArray(value)) return value.map(wire);
+// Walks a schema, dropping the keyword keys `drop` names. The keys of a `properties` map
+// are field names, not keywords, so a field that happens to be called "description" or
+// "$schema" is kept.
+function strip(value, drop, fieldNames = false) {
+	if (Array.isArray(value)) return value.map((v) => strip(v, drop));
 	if (value && typeof value === 'object') {
 		const out = {};
 		for (const k of Object.keys(value).sort()) {
-			if (VOLATILE_KEYS.has(k) || PROSE_KEYS.has(k) || k === 'x-enum-binary-value') continue;
-			out[k] = wire(value[k]);
+			if (!fieldNames && drop.has(k)) continue;
+			out[k] = strip(value[k], drop, !fieldNames && k === 'properties');
 		}
 		return out;
 	}
 	return value;
 }
 
+function stable(value) {
+	return strip(value, VOLATILE_KEYS);
+}
+
+// Strips prose and enum value annotations so two schemas compare equal when only their
+// documentation differs. Explicit enum values are compared separately by classify,
+// because Mojang began publishing them for enums whose values were already fixed.
+const WIRE_DROPPED = new Set([...VOLATILE_KEYS, ...PROSE_KEYS, 'x-enum-binary-value']);
+function wire(value) {
+	return strip(value, WIRE_DROPPED);
+}
+
 // Every x-enum-binary-value in a schema, keyed by its path, at any depth.
-function enumValues(value, at = '', out = new Map()) {
+function enumValues(value, at = '', out = new Map(), fieldNames = false) {
 	if (Array.isArray(value)) value.forEach((v, i) => enumValues(v, `${at}/${i}`, out));
 	else if (value && typeof value === 'object') {
 		for (const [k, v] of Object.entries(value)) {
-			if (k === 'x-enum-binary-value') out.set(at, v);
-			else enumValues(v, `${at}/${k}`, out);
+			if (!fieldNames && k === 'x-enum-binary-value') out.set(at, v);
+			else enumValues(v, `${at}/${k}`, out, !fieldNames && k === 'properties');
 		}
 	}
 	return out;
@@ -115,21 +117,24 @@ function enumValues(value, at = '', out = new Map()) {
 
 const inIndexOrder = (values) => Array.isArray(values) && values.every((v, i) => v === i);
 
-// 'wire' when the encoding differs. 'values-first-published' when the only difference is
-// enum values Mojang now publishes for the first time and they are not 0, 1, 2 in order:
-// those may or may not match what our code already sends, so a person checks them.
-// 'annotation' when only documentation differs. 'same' otherwise.
+// 'wire' when the encoding differs. 'values-to-check' when the only difference is enum
+// values that Mojang publishes for the first time, or stops publishing, and that are not
+// 0, 1, 2 in order: those may or may not match what our code sends, so a person checks
+// them. 'annotation' when only documentation differs. 'same' otherwise.
 function classify(a, b) {
 	if (JSON.stringify(wire(a)) !== JSON.stringify(wire(b))) return 'wire';
 	const va = enumValues(a);
 	const vb = enumValues(b);
-	let firstPublishedUnordered = false;
+	let toCheck = false;
 	for (const [at, values] of vb) {
 		if (va.has(at)) {
 			if (JSON.stringify(va.get(at)) !== JSON.stringify(values)) return 'wire';
-		} else if (!inIndexOrder(values)) firstPublishedUnordered = true;
+		} else if (!inIndexOrder(values)) toCheck = true;
 	}
-	if (firstPublishedUnordered) return 'values-first-published';
+	for (const [at, values] of va) {
+		if (!vb.has(at) && !inIndexOrder(values)) toCheck = true;
+	}
+	if (toCheck) return 'values-to-check';
 	return JSON.stringify(stable(a)) === JSON.stringify(stable(b)) ? 'same' : 'annotation';
 }
 
@@ -200,7 +205,7 @@ function diffDocs(from, to) {
 
 	const changedTypes = [];
 	const annotatedTypes = [];
-	const firstPublished = [];
+	const valuesToCheck = [];
 	const addedTypes = [];
 	for (const [name, schema] of to.schemas) {
 		const old = from.schemas.get(name);
@@ -210,7 +215,7 @@ function diffDocs(from, to) {
 		}
 		const kind = classify(old, schema);
 		if (kind === 'wire') changedTypes.push(name);
-		else if (kind === 'values-first-published') firstPublished.push(name);
+		else if (kind === 'values-to-check') valuesToCheck.push(name);
 		else if (kind === 'annotation') annotatedTypes.push(name);
 	}
 	const removedTypes = [...from.schemas.keys()].filter((n) => !to.schemas.has(n));
@@ -236,7 +241,7 @@ function diffDocs(from, to) {
 			id_changed: idChanged,
 			changed: changedPackets,
 		},
-		types: { added: addedTypes.sort(), removed: removedTypes.sort(), changed: changedTypes.sort(), values_first_published: firstPublished.sort(), annotation_only: annotatedTypes.sort() },
+		types: { added: addedTypes.sort(), removed: removedTypes.sort(), changed: changedTypes.sort(), enum_values_to_check: valuesToCheck.sort(), annotation_only: annotatedTypes.sort() },
 		developer_notes: newNotes,
 	};
 }

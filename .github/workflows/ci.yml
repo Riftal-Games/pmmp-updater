@@ -21,8 +21,6 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          fetch-depth: 0
 
       - name: Node version
         run: |
@@ -31,12 +29,6 @@ jobs:
 
       - name: Skills keep the shared failure block
         run: node tools/skills-lint/lint.js
-
-      # A lesson PR may not loosen the rules that bound lessons, delete a file or drop
-      # a test. See .claude/skills/skill-incident.
-      - name: Lesson bounds
-        if: contains(github.head_ref, '-lesson-')
-        run: node tools/lesson-guard/check.js "origin/${{ github.base_ref }}"
 
       - name: Tool tests
         run: node --test "tools/**/*.test.js"

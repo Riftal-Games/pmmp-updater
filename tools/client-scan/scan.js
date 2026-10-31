@@ -28,6 +28,7 @@ function parseArgs(argv) {
 		else if (a === '--no-save') args.save = false;
 		else if (a === '--snapshots') args.snapshots = argv[++i];
 		else if (a === '--packages-src') args.packagesSrc = argv[++i];
+		else if (a === '--core') args.coreDir = argv[++i];
 		else throw new Error(`unknown argument ${a}`);
 	}
 	return args;
@@ -213,19 +214,32 @@ function clientProtocol(gameVersion, offline) {
 	return { tag: tag.tag, protocol: docs.loadDocs(docs.checkout(tag.tag)).protocol };
 }
 
-function verdict(ours, client) {
+// Players get what pmmp-core builds, so a core pin older than the client outranks our
+// packages being current.
+function verdict(ours, client, core) {
 	if (!client.game_version) return 'UNKNOWN: could not read the client version';
+	if (client.protocol && !client.protocol.protocol) return `UNKNOWN PROTOCOL: Mojang's ${client.protocol.tag} names no protocol number; read its release notes`;
+	const coreBehind = core && core.version && compareVersions(core.version, client.game_version) < 0;
 	if (client.protocol) {
 		if (client.protocol.protocol === ours.protocol) {
+			if (coreBehind) return `CORE BEHIND: our packages speak the client's protocol ${ours.protocol}, but the pmmp-core checkout builds ${core.version}; players cannot join until pmmp-core consumes these packages`;
 			return compareVersions(ours.version, client.game_version) === 0
 				? 'CURRENT: our packages speak the client\'s protocol and version'
 				: `CURRENT PROTOCOL: both speak ${ours.protocol}, but the client is ${client.game_version} and our packages ${ours.version}; the boot test decides, since block and item data can still differ`;
 		}
+		if (compareVersions(client.game_version, ours.version) < 0) return `CLIENT OLDER: the client is ${client.game_version} (protocol ${client.protocol.protocol}), older than our packages' ${ours.version} (${ours.protocol}); update the client, not the server`;
 		return `BEHIND: the client speaks ${client.protocol.protocol} (${client.protocol.tag}), our packages ${ours.protocol}; run /protocol-update`;
 	}
-	return compareVersions(ours.version, client.game_version) >= 0
-		? 'CURRENT BY VERSION: no Mojang docs reached, protocol unconfirmed'
-		: 'BEHIND BY VERSION: no Mojang docs reached, protocol unconfirmed; run /docs-diff, then /protocol-update';
+	if (compareVersions(ours.version, client.game_version) < 0) return 'BEHIND BY VERSION: no Mojang docs reached, protocol unconfirmed; run /docs-diff, then /protocol-update';
+	if (coreBehind) return `CORE BEHIND BY VERSION: no Mojang docs reached, and the pmmp-core checkout builds ${core.version}`;
+	return 'CURRENT BY VERSION: no Mojang docs reached, protocol unconfirmed';
+}
+
+// The exe's file version names hotfix builds, such as 1.26.61, that ship no new vanilla
+// pack, so it is preferred over the newest pack folder.
+function gameVersionOf(exeFileVersion, behaviorDelta) {
+	if (exeFileVersion && !/^0\./.test(exeFileVersion)) return exeFileVersion.split('.').slice(0, 3).join('.');
+	return behaviorDelta ? behaviorDelta.version : null;
 }
 
 function scan(args) {
@@ -238,7 +252,8 @@ function scan(args) {
 	const behaviorDelta = newestDelta(packInventory(path.join(args.client, 'data', 'behavior_packs')));
 	const limitsFile = path.join(args.client, 'data', 'packetlimitconfig.json');
 	const limits = fs.existsSync(limitsFile) ? JSON.parse(fs.readFileSync(limitsFile, 'utf8')) : { limitGroups: [] };
-	const gameVersion = behaviorDelta ? behaviorDelta.version : null;
+	const exeFileVersion = fileVersion(buf, sections);
+	const gameVersion = gameVersionOf(exeFileVersion, behaviorDelta);
 	const ours = pkg.readProtocolInfo(args.packagesSrc);
 	const ourClasses = pkg.packetClasses(args.packagesSrc);
 	const clientPackets = dropDecorated(packetNames(buf, sections), ourClasses);
@@ -248,20 +263,20 @@ function scan(args) {
 		client: {
 			path: args.client,
 			package_version: packageVersion,
-			exe_file_version: fileVersion(buf, sections),
+			exe_file_version: exeFileVersion,
 			exe_sha256: crypto.createHash('sha256').update(buf).digest('hex'),
 			game_version: gameVersion,
 			protocol: clientProtocol(gameVersion, args.offline),
 		},
 		packages: { protocol: ours.protocol, version: ours.version },
-		core_pin: pkg.corePin(),
+		core_pin: pkg.corePin(args.coreDir),
 		packet_limit_ids: [...new Set(limits.limitGroups.flatMap((g) => g.minecraftPacketIds))].sort((a, b) => a - b),
 		client_packet_names: clientPackets,
 		not_in_packages: diffIgnoringCase(clientPackets, ourClasses),
 		behavior_delta: behaviorDelta,
 		resource_delta: newestDelta(packInventory(path.join(args.client, 'data', 'resource_packs'))),
 	};
-	snapshot.verdict = verdict(ours, snapshot.client);
+	snapshot.verdict = verdict(ours, snapshot.client, snapshot.core_pin);
 	return snapshot;
 }
 
@@ -275,9 +290,6 @@ function render(snapshot, previous) {
 	const core = snapshot.core_pin;
 	out.push(`pmmp-core checkout pins: ${core ? `${core.package_version} from ${core.source}` : 'no sibling pmmp-core checkout'}`);
 	out.push(`Verdict: ${snapshot.verdict}`);
-	if (core && core.version && compareVersions(core.version, snapshot.packages.version) !== 0) {
-		out.push(`Core lags: the checked-out pmmp-core branch builds ${core.version}, not our packages' ${snapshot.packages.version}. Players get what pmmp-core builds.`);
-	}
 	out.push('');
 	out.push(`## Client packet names with no class in our packages (${snapshot.not_in_packages.length})`);
 	out.push('Mostly client internals and packets the protocol dropped. A name new since the previous snapshot is a packet our packages lack.');
@@ -319,4 +331,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { peSections, fileVersion, packetNames, dropDecorated, readBrarchive, packInventory, newestDelta, verdict, scan, render, compareVersions, BRARCHIVE_MAGIC, VS_FIXEDFILEINFO_SIGNATURE };
+module.exports = { peSections, fileVersion, packetNames, dropDecorated, readBrarchive, packInventory, newestDelta, verdict, gameVersionOf, scan, render, compareVersions, BRARCHIVE_MAGIC, VS_FIXEDFILEINFO_SIGNATURE };

@@ -21,9 +21,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
 
-      # Mojang docs tags are cached under the runner user's ~/.cache, outside the
-      # workspace, and reused across runs rather than re-cloned.
       - name: Node version
         run: |
           node --version
@@ -32,11 +32,18 @@ jobs:
       - name: Skills keep the shared failure block
         run: node tools/skills-lint/lint.js
 
+      # A lesson PR may not loosen the rules that bound lessons, delete a file or drop
+      # a test. See .claude/skills/skill-incident.
+      - name: Lesson bounds
+        if: contains(github.head_ref, '-lesson-')
+        run: node tools/lesson-guard/check.js "origin/${{ github.base_ref }}"
+
       - name: Tool tests
         run: node --test "tools/**/*.test.js"
 
-      # Against Mojang's published docs, so a change in how Mojang lays out a tag
-      # fails here before it fails a version run.
+      # Against Mojang's published docs, so a change in how Mojang lays out a tag fails
+      # here before it fails a version run. Tags are cached under the runner user's
+      # ~/.cache, outside the workspace, and reused across runs.
       - name: Live docs check
         env:
           RIFTAL_LIVE: "1"

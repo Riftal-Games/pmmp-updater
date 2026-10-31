@@ -1,4 +1,4 @@
-# riftal-protocol
+# pmmp-updater
 
 The Bedrock protocol pipeline for the RiftalGames server. pmmp-core builds against the packages in `packages/`; everything else here produces the next version of them.
 

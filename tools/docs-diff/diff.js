@@ -62,7 +62,8 @@ function render(r) {
 	out.push(`## Changed packets (${d.packets.changed.length})`);
 	out.push(list(d.packets.changed, (p) => `- ${p.name} (ID ${p.id}) via ${p.types.join(', ')}`));
 	out.push('');
-	out.push(`## Types: ${d.types.added.length} added, ${d.types.removed.length} removed, ${d.types.changed.length} changed on the wire, ${d.types.annotation_only.length} changed in documentation only`);
+	out.push(`## Types: ${d.types.added.length} added, ${d.types.removed.length} removed, ${d.types.changed.length} changed on the wire, ${d.types.values_first_published.length} with enum values to check, ${d.types.annotation_only.length} changed in documentation only`);
+	if (d.types.values_first_published.length) out.push(`Enum values published for the first time, not 0, 1, 2 in order. Check each against our code: ${d.types.values_first_published.join(', ')}`);
 	if (d.types.added.length) out.push(`Added: ${d.types.added.join(', ')}`);
 	if (d.types.removed.length) out.push(`Removed: ${d.types.removed.join(', ')}`);
 	if (d.types.changed.length) out.push(`Changed: ${d.types.changed.join(', ')}`);

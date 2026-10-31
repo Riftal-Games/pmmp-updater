@@ -1,4 +1,4 @@
-# riftal-protocol
+# pmmp-updater
 
 This repository owns the Minecraft Bedrock protocol for the RiftalGames server: the protocol and data libraries pmmp-core runs on, the tools that produce each new version of them, and the skills that drive those tools. It exists so that a Bedrock release never waits on a maintainer outside RiftalGames. Nasir decided this on 2026-11-01.
 
@@ -44,7 +44,7 @@ When a skill or tool fails, the run stops and follows `skill-incident`. The inci
 ## Branches and conventions
 
 - `main` is the mainline. Never push to it, never force-push, never rebase published history.
-- Working branches: `proto/<issue>-<slug>`. Lesson PRs: `proto/<issue>-lesson-<slug>`. Preview work: `bedrock-<version>`.
+- Working branches: `updater/<issue>-<slug>`. Lesson PRs: `updater/<issue>-lesson-<slug>`. Preview work: `bedrock-<version>`.
 - Commits `<type>: <summary>` with `Refs #<issue>`. The PR description must contain `Closes #<issue>`. Squash merge.
 - The comment rules in the root `CLAUDE.md` apply to every file here.
 

@@ -1,6 +1,6 @@
 ---
 name: skill-incident
-description: What every skill and tool in riftal-protocol does when it fails - stop, record the incident, fix the run, then open a reviewed lesson PR that updates the skill or script and adds a regression test. Use whenever a step in any riftal-protocol skill fails or produces a result that contradicts another source.
+description: What every skill and tool in pmmp-updater does when it fails - stop, record the incident, fix the run, then open a reviewed lesson PR that updates the skill or script and adds a regression test. Use whenever a step in any pmmp-updater skill fails or produces a result that contradicts another source.
 when_to_use: A step fails, a tool errors, a verdict contradicts another source (for example the client scan and Mojang's docs disagree on a version), a stage runs over its time budget, or a skill's instructions turned out to be wrong.
 ---
 
@@ -33,12 +33,14 @@ Investigate until you can state why it happened, or until you can say what you r
 
 Make the smallest change that lets the current run continue, on the run's working branch. Fill in the incident's "Fix for this run" section. Continue the original skill.
 
+The bounds below apply to this fix too. A run fix that needs a protected path, a deleted test or a widened permission is not a run fix; stop and hand it to the steward.
+
 ## 6. Change the pipeline
 
 Separately from the run, so the run's PR stays about the version and the lesson stays reviewable on its own:
 
-1. File an issue in `Riftal-Games/riftal-protocol` labelled `lesson`, `owner:protocol`, `route:loop`, linking the incident.
-2. Branch `proto/<issue>-lesson-<slug>` from `main`.
+1. File an issue in `Riftal-Games/pmmp-updater` labelled `lesson`, `owner:updater`, `route:loop`, linking the incident.
+2. Branch `updater/<issue>-lesson-<slug>` from `main`.
 3. Change what failed: the SKILL.md step that was wrong or missing, or the script that broke.
 4. Add a regression test or fixture under the tool's `test/` that fails without the change and passes with it. For a pure instruction change with no code, add the check to the skill's own steps as an explicit command whose output proves the condition.
 5. Add one line to `docs/lessons.md`: the date, what to do, and a link to the incident.
@@ -50,12 +52,20 @@ If this symptom already has an incident and a merged lesson, the lesson did not 
 
 ## Bounds
 
-A lesson PR may change skills under `.claude/skills/`, tools under `tools/`, their tests and fixtures, and `docs/`. It may not:
+A lesson PR may change skills under `.claude/skills/`, tools under `tools/`, their tests and fixtures, and `docs/`, except the protected paths below. It may not:
 
-- touch `CLAUDE.md` here or anywhere, `.claude/settings.json`, `.claude/hooks/`, or any agent definition. Write a `needs an issue:` line for the steward instead;
+- touch a protected path. These are the rules that bound lessons, so a lesson changing them would be loosening its own limits:
+  - `CLAUDE.md` here or anywhere, `.claude/settings.json`, `.claude/hooks/`, any agent definition;
+  - `.claude/skills/skill-incident/` (this file) and `.claude/skills/FAILURE-BLOCK.md`;
+  - `tools/skills-lint/` and `tools/lesson-guard/`, which enforce them;
+  - `.github/`, which runs the enforcement.
+
+  Write a `needs an issue:` line for the steward instead. A change to any of them is a steward decision, and one that widens a power goes to the two-instance panel the root contract requires;
 - widen what any skill, agent or tool is allowed to do;
 - delete or weaken a test or fixture to make a run pass. That is a hard stop for Nasir;
 - edit `packages/` to make a tool's output match. Package changes belong to a version run, not a lesson.
+
+CI enforces the path rules mechanically: on a branch named `*-lesson-*`, `tools/lesson-guard` fails the run if the diff touches a protected path, deletes any file, or removes a test.
 
 ## Budgets that trigger an incident
 

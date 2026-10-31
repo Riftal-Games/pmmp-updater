@@ -12,11 +12,12 @@ const { execFileSync } = require('child_process');
 const DOCS_URL = 'https://github.com/Mojang/bedrock-protocol-docs';
 const VOLATILE_KEYS = new Set(['$schema', 'x-minecraft-version', 'x-protocol-version', 'x-format-version']);
 const PROSE_KEYS = new Set(['description', 'x-runtime-constraint-description', '[cereal:packet_details]']);
+const COMPLETE_MARKER = '.checkout-complete';
 
 function cacheRoot() {
-	if (process.env.RIFTAL_PROTOCOL_CACHE) return process.env.RIFTAL_PROTOCOL_CACHE;
-	if (process.env.LOCALAPPDATA) return path.join(process.env.LOCALAPPDATA, 'riftal-protocol', 'cache');
-	return path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'riftal-protocol');
+	if (process.env.PMMP_UPDATER_CACHE) return process.env.PMMP_UPDATER_CACHE;
+	if (process.env.LOCALAPPDATA) return path.join(process.env.LOCALAPPDATA, 'pmmp-updater', 'cache');
+	return path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'pmmp-updater');
 }
 
 function git(args, opts = {}) {
@@ -58,14 +59,19 @@ function tagForVersion(tags, version) {
 	return matches.length ? matches[matches.length - 1] : null;
 }
 
+// A tag is cloned into a temporary folder and renamed into place only once complete, so
+// an interrupted clone never leaves a partial tree that later runs would trust.
 function checkout(tag) {
 	const dir = path.join(cacheRoot(), 'mojang-docs', tag);
-	if (!fs.existsSync(path.join(dir, 'json'))) {
-		fs.mkdirSync(path.dirname(dir), { recursive: true });
-		fs.rmSync(dir, { recursive: true, force: true });
-		git(['clone', '-q', '--depth', '1', '--branch', tag, '--filter=blob:none', '--sparse', DOCS_URL, dir]);
-		git(['-C', dir, 'sparse-checkout', 'set', 'json', 'developer_notes']);
-	}
+	if (fs.existsSync(path.join(dir, COMPLETE_MARKER))) return dir;
+	fs.mkdirSync(path.dirname(dir), { recursive: true });
+	const partial = `${dir}.partial-${process.pid}`;
+	fs.rmSync(partial, { recursive: true, force: true });
+	git(['clone', '-q', '--depth', '1', '--branch', tag, '--filter=blob:none', '--sparse', DOCS_URL, partial]);
+	git(['-C', partial, 'sparse-checkout', 'set', 'json', 'developer_notes']);
+	fs.writeFileSync(path.join(partial, COMPLETE_MARKER), `${tag}\n`);
+	fs.rmSync(dir, { recursive: true, force: true });
+	fs.renameSync(partial, dir);
 	return dir;
 }
 
@@ -80,7 +86,7 @@ function stable(value) {
 }
 
 // Strips prose and enum value annotations so two schemas compare equal when only their
-// documentation differs. Explicit enum values are compared separately by wireChanged,
+// documentation differs. Explicit enum values are compared separately by classify,
 // because Mojang began publishing them for enums whose values were already fixed.
 function wire(value) {
 	if (Array.isArray(value)) return value.map(wire);
@@ -95,11 +101,40 @@ function wire(value) {
 	return value;
 }
 
+// Every x-enum-binary-value in a schema, keyed by its path, at any depth.
+function enumValues(value, at = '', out = new Map()) {
+	if (Array.isArray(value)) value.forEach((v, i) => enumValues(v, `${at}/${i}`, out));
+	else if (value && typeof value === 'object') {
+		for (const [k, v] of Object.entries(value)) {
+			if (k === 'x-enum-binary-value') out.set(at, v);
+			else enumValues(v, `${at}/${k}`, out);
+		}
+	}
+	return out;
+}
+
+const inIndexOrder = (values) => Array.isArray(values) && values.every((v, i) => v === i);
+
+// 'wire' when the encoding differs. 'values-first-published' when the only difference is
+// enum values Mojang now publishes for the first time and they are not 0, 1, 2 in order:
+// those may or may not match what our code already sends, so a person checks them.
+// 'annotation' when only documentation differs. 'same' otherwise.
+function classify(a, b) {
+	if (JSON.stringify(wire(a)) !== JSON.stringify(wire(b))) return 'wire';
+	const va = enumValues(a);
+	const vb = enumValues(b);
+	let firstPublishedUnordered = false;
+	for (const [at, values] of vb) {
+		if (va.has(at)) {
+			if (JSON.stringify(va.get(at)) !== JSON.stringify(values)) return 'wire';
+		} else if (!inIndexOrder(values)) firstPublishedUnordered = true;
+	}
+	if (firstPublishedUnordered) return 'values-first-published';
+	return JSON.stringify(stable(a)) === JSON.stringify(stable(b)) ? 'same' : 'annotation';
+}
+
 function wireChanged(a, b) {
-	if (JSON.stringify(wire(a)) !== JSON.stringify(wire(b))) return true;
-	const va = a['x-enum-binary-value'];
-	const vb = b['x-enum-binary-value'];
-	return va !== undefined && vb !== undefined && JSON.stringify(va) !== JSON.stringify(vb);
+	return classify(a, b) === 'wire';
 }
 
 function refsOf(schema, out = new Set()) {
@@ -165,12 +200,18 @@ function diffDocs(from, to) {
 
 	const changedTypes = [];
 	const annotatedTypes = [];
+	const firstPublished = [];
 	const addedTypes = [];
 	for (const [name, schema] of to.schemas) {
 		const old = from.schemas.get(name);
-		if (!old) addedTypes.push(name);
-		else if (wireChanged(old, schema)) changedTypes.push(name);
-		else if (JSON.stringify(stable(schema)) !== JSON.stringify(stable(old))) annotatedTypes.push(name);
+		if (!old) {
+			addedTypes.push(name);
+			continue;
+		}
+		const kind = classify(old, schema);
+		if (kind === 'wire') changedTypes.push(name);
+		else if (kind === 'values-first-published') firstPublished.push(name);
+		else if (kind === 'annotation') annotatedTypes.push(name);
 	}
 	const removedTypes = [...from.schemas.keys()].filter((n) => !to.schemas.has(n));
 	const touched = new Set([...changedTypes, ...addedTypes, ...removedTypes]);
@@ -195,9 +236,9 @@ function diffDocs(from, to) {
 			id_changed: idChanged,
 			changed: changedPackets,
 		},
-		types: { added: addedTypes.sort(), removed: removedTypes.sort(), changed: changedTypes.sort(), annotation_only: annotatedTypes.sort() },
+		types: { added: addedTypes.sort(), removed: removedTypes.sort(), changed: changedTypes.sort(), values_first_published: firstPublished.sort(), annotation_only: annotatedTypes.sort() },
 		developer_notes: newNotes,
 	};
 }
 
-module.exports = { DOCS_URL, cacheRoot, parseTag, compareTags, parseLsRemote, listTags, tagForVersion, checkout, loadDocs, diffDocs, stable, wire, wireChanged, refsOf };
+module.exports = { DOCS_URL, cacheRoot, parseTag, compareTags, parseLsRemote, listTags, tagForVersion, checkout, loadDocs, diffDocs, stable, wire, classify, wireChanged, enumValues, refsOf };

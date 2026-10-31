@@ -66,6 +66,21 @@ test('separates wire changes from documentation-only changes', () => {
 	assert.deepEqual(r.diff.types.annotation_only, ['Mode']);
 });
 
+test('renumbered enum values nested inside a schema are a wire change', () => {
+	const nested = (values) => ({ type: 'object', properties: { Kind: { type: 'string', enum: ['A', 'B'], 'x-enum-binary-value': values } } });
+	assert.equal(docs.classify(nested([0, 1]), nested([0, 7])), 'wire');
+	assert.equal(docs.classify(nested([0, 1]), nested([0, 1])), 'same');
+});
+
+test('enum values published for the first time out of index order are flagged for a check', () => {
+	const plain = { type: 'string', enum: ['A', 'B', 'C'] };
+	assert.equal(docs.classify(plain, { ...plain, 'x-enum-binary-value': [0, 1, 2] }), 'annotation');
+	assert.equal(docs.classify(plain, { ...plain, 'x-enum-binary-value': [0, 1, 5] }), 'values-first-published');
+	const nestedPlain = { type: 'object', properties: { Kind: plain } };
+	const nestedValued = { type: 'object', properties: { Kind: { ...plain, 'x-enum-binary-value': [2, 4, 8] } } };
+	assert.equal(docs.classify(nestedPlain, nestedValued), 'values-first-published');
+});
+
 test('finds new developer notes in subdirectories', () => {
 	const { from, to, src } = buildPair();
 	const r = run({ from_dir: from, to_dir: to, packages_src: src });

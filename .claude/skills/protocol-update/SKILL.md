@@ -17,7 +17,7 @@ Protocol updates are priority one (hard rule 3). Nothing in this procedure is a 
 
 1. Read `docs/lessons.md`.
 2. Open or create `docs/versions/<version>.md` from the previous runbook's headings. Write the start time of each stage as you begin it.
-3. Find the issue for the version (from `tools/watch`, #4) or file one: `owner:protocol`, `prep` for a preview, `critical-path` for a release.
+3. Find the issue for the version (from `tools/watch`, #4) or file one: `owner:updater`, `prep` for a preview, `critical-path` for a release.
 4. Work on branch `bedrock-<version>` here, and `bedrock-<version>` in pmmp-core for core changes. Never merge either into a mainline before Mojang releases the version.
 
 ## Stage 1: Detect and scope
@@ -42,7 +42,7 @@ On release day, rerun Stage 1's docs-diff from the last preview tag to the relea
 BDS supplies what the schemas cannot: block states, item tables, recipes, creative inventory. `tools/bds` (#3) runs it in a container; downloading BDS accepts Mojang's EULA, which Nasir accepted once (recorded in the decision log). Until #3 lands, follow its issue for the manual steps.
 
 1. Dump protocol info and mapping files from BDS into `packages/bedrock-data`. Copy files, not folders.
-2. Capture a packet trace by joining BDS with the real client through `devtools/relay.js --upstream 127.0.0.1:<bds port>` on its own `RELAY_PORT`, then run `php tools/generate-bedrock-data-from-packets.php <trace> <packages/bedrock-data>` from pmmp-core.
+2. Capture a packet trace by joining BDS with the real client through the root workspace's `../devtools/relay.js --upstream 127.0.0.1:<bds port>` on its own `RELAY_PORT`, then run `php tools/generate-bedrock-data-from-packets.php <trace> <packages/bedrock-data>` from pmmp-core.
 3. In `packages/bedrock-protocol`, run `php tools/update-from-bedrock-data.php` and the other `tools/generate-*.php` scripts the new data needs.
 4. Block upgrade schema: run pmmp-core's `tools/blockstate-upgrade-schema-utils.php` on the new `*_to_current_block_map.bin` and add the output to `packages/bedrock-block-upgrade-schema/nbt_upgrade_schema/` under the next number.
 5. Item upgrade schema: run pmmp-core's `tools/generate-item-upgrade-schema.php` and add the output to `packages/bedrock-item-upgrade-schema/id_meta_upgrade_schema/` under the next number.
@@ -71,7 +71,7 @@ PLAYABLE is never claimed. That is Nasir on a device.
 
 ## Stage 6: Release
 
-1. Merge `bedrock-<version>` into `main` here, and tag `bedrock-<version>`. Merge, never rebase.
+1. Open a PR from `bedrock-<version>` to `main` here with `Closes #<issue>`. The approver or the steward merges it; you never merge it yourself. Tag `bedrock-<version>` on the merge commit after it lands. Never rebase.
 2. In pmmp-core: bump the submodule to that tag, bump `BASE_VERSION` in `src/VersionInfo.php` by a **minor** step, and merge through the steward. Record the image tag.
 3. If block or item data changed, tell `riftal-game` which, for `/test-server` before rollout.
 

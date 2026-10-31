@@ -8,7 +8,7 @@ const os = require('os');
 const path = require('path');
 
 function tempDir(prefix) {
-	return fs.mkdtempSync(path.join(os.tmpdir(), `riftal-protocol-${prefix}-`));
+	return fs.mkdtempSync(path.join(os.tmpdir(), `pmmp-updater-${prefix}-`));
 }
 
 function writeTree(root, files) {

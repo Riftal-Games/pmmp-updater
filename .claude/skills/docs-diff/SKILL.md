@@ -18,7 +18,7 @@ node tools/docs-diff/diff.js
 
 With no arguments it compares the version our packages speak (`MINECRAFT_VERSION_NETWORK` in `packages/bedrock-protocol/src/ProtocolInfo.php`) against the newest Mojang tag, preview or release. Choose tags with `--from v1.26.60 --to v1.26.70-preview.22`. `--json` prints the full result.
 
-The first run of a tag clones it sparsely into the cache (`%LOCALAPPDATA%\riftal-protocol\cache`, or `RIFTAL_PROTOCOL_CACHE`), a few seconds per tag. Never copy anything from the cache into this repository.
+The first run of a tag clones it sparsely into the cache (`%LOCALAPPDATA%\pmmp-updater\cache`, or `PMMP_UPDATER_CACHE`), a few seconds per tag. Never copy anything from the cache into this repository.
 
 ## Read the report
 

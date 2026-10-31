@@ -79,7 +79,8 @@ function fakePackages(protocol, version) {
 }
 
 test('reads version, packet names and the newest content delta from a client tree', () => {
-	const s = scan.scan({ client: fakeClient(), offline: true, packagesSrc: fakePackages(5, '1.2.30') });
+	const s = scan.scan({ client: fakeClient(), offline: true, packagesSrc: fakePackages(5, '1.2.30'), coreDir: fx.tempDir('no-core') });
+	assert.equal(s.core_pin, null);
 	assert.equal(s.client.package_version, '1.2.305.0');
 	assert.equal(s.client.exe_file_version, '1.2.30.5');
 	assert.equal(s.client.game_version, '1.2.30');
@@ -96,11 +97,28 @@ test('decorated MSVC names collapse onto the real class name', () => {
 
 test('the verdict follows the protocol number when Mojang supplies one', () => {
 	const ours = { protocol: 2225, version: '1.26.60' };
-	assert.match(scan.verdict(ours, { game_version: '1.26.60', protocol: { tag: 'v1.26.60', protocol: 2225 } }), /^CURRENT:/);
-	assert.match(scan.verdict(ours, { game_version: '1.26.61', protocol: { tag: 'v1.26.61', protocol: 2225 } }), /^CURRENT PROTOCOL:/);
-	assert.match(scan.verdict(ours, { game_version: '1.26.70', protocol: { tag: 'v1.26.70', protocol: 2239 } }), /^BEHIND: the client speaks 2239/);
-	assert.match(scan.verdict(ours, { game_version: '1.26.70', protocol: null }), /^BEHIND BY VERSION/);
-	assert.match(scan.verdict(ours, { game_version: null, protocol: null }), /^UNKNOWN/);
+	const client = (v, p) => ({ game_version: v, protocol: p === undefined ? null : { tag: `v${v}`, protocol: p } });
+	assert.match(scan.verdict(ours, client('1.26.60', 2225), null), /^CURRENT:/);
+	assert.match(scan.verdict(ours, client('1.26.61', 2225), null), /^CURRENT PROTOCOL:/);
+	assert.match(scan.verdict(ours, client('1.26.70', 2239), null), /^BEHIND: the client speaks 2239/);
+	assert.match(scan.verdict(ours, client('1.26.50', 2193), null), /^CLIENT OLDER/);
+	assert.match(scan.verdict(ours, client('1.26.60', null), null), /^UNKNOWN PROTOCOL/);
+	assert.match(scan.verdict(ours, client('1.26.70'), null), /^BEHIND BY VERSION/);
+	assert.match(scan.verdict(ours, { game_version: null, protocol: null }, null), /^UNKNOWN:/);
+});
+
+test('a pmmp-core pin older than the client outranks current packages', () => {
+	const ours = { protocol: 2225, version: '1.26.60' };
+	const client = { game_version: '1.26.60', protocol: { tag: 'v1.26.60', protocol: 2225 } };
+	assert.match(scan.verdict(ours, client, { version: '1.26.50' }), /^CORE BEHIND: .* builds 1\.26\.50/);
+	assert.match(scan.verdict(ours, client, { version: '1.26.60' }), /^CURRENT:/);
+	assert.match(scan.verdict(ours, { game_version: '1.26.60', protocol: null }, { version: '1.26.50' }), /^CORE BEHIND BY VERSION/);
+});
+
+test('the exe file version names hotfix builds the pack folders do not', () => {
+	assert.equal(scan.gameVersionOf('1.26.61.1', { version: '1.26.60' }), '1.26.61');
+	assert.equal(scan.gameVersionOf(null, { version: '1.26.60' }), '1.26.60');
+	assert.equal(scan.gameVersionOf('0.0.0.0', { version: '1.26.60' }), '1.26.60');
 });
 
 test('live: the installed client is readable', { skip: !process.env.RIFTAL_LIVE_CLIENT }, () => {

@@ -1,0 +1,116 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('path');
+const docs = require('../../lib/mojang-docs');
+const pkg = require('../../lib/packages');
+const { run } = require('../diff');
+const fx = require('../../test-support/fixtures');
+
+function buildPair() {
+	const from = fx.writeTree(fx.tempDir('from'), {
+		...fx.docsTree(100, {
+			AlphaPacket: fx.packet('AlphaPacket', 1, 100),
+			AlphaPacketPayload: { type: 'object', properties: { Mode: { $ref: './Mode.json', 'x-ordinal-index': 0 } } },
+			Mode: { type: 'string', enum: ['Off', 'On'], 'x-underlying-type': 'uint8' },
+			BetaPacket: fx.packet('BetaPacket', 2, 100),
+			BetaPacketPayload: { type: 'object', properties: { Count: { type: 'integer', 'x-underlying-type': 'int32', 'x-ordinal-index': 0 } } },
+			GammaPacket: fx.packet('GammaPacket', 3, 100),
+			GammaPacketPayload: { type: 'object', properties: { Level: { $ref: './Level.json' } } },
+			Level: { type: 'string', enum: ['Low', 'High'], 'x-enum-binary-value': [0, 1] },
+			OldPacket: fx.packet('OldPacket', 9, 100),
+			OldPacketPayload: { type: 'object', properties: {} },
+		}),
+		'developer_notes/a.md': '# Old note',
+	});
+	const to = fx.writeTree(fx.tempDir('to'), {
+		...fx.docsTree(101, {
+			AlphaPacket: fx.packet('AlphaPacket', 1, 101),
+			AlphaPacketPayload: { type: 'object', properties: { Mode: { $ref: './Mode.json', 'x-ordinal-index': 0 } } },
+			Mode: { type: 'string', enum: ['Off', 'On'], 'x-underlying-type': 'uint8', 'x-enum-binary-value': [0, 1], description: 'Newly documented.' },
+			BetaPacket: fx.packet('BetaPacket', 5, 101),
+			BetaPacketPayload: { type: 'object', properties: { Count: { type: 'integer', 'x-underlying-type': 'int32', 'x-ordinal-index': 0 }, Extra: { type: 'boolean', 'x-ordinal-index': 1 } } },
+			GammaPacket: fx.packet('GammaPacket', 3, 101),
+			GammaPacketPayload: { type: 'object', properties: { Level: { $ref: './Level.json' } } },
+			Level: { type: 'string', enum: ['Low', 'High'], 'x-enum-binary-value': [0, 2] },
+			NewPacket: fx.packet('NewPacket', 10, 101),
+			NewPacketPayload: { type: 'object', properties: {} },
+		}),
+		'developer_notes/a.md': '# Old note',
+		'developer_notes/r1/b.md': '# Network Protocol\n- Added NewPacket',
+	});
+	const src = fx.writeTree(fx.tempDir('pkg'), {
+		'ProtocolInfo.php': fx.protocolInfoPhp(100, '1.0.0', { ALPHA: 1, BETA: 2, GAMMA: 3, OLD: 9 }),
+		'AlphaPacket.php': '', 'BetaPacket.php': '', 'GammaPacket.php': '', 'OldPacket.php': '', 'DataPacket.php': '', 'ServerboundPacket.php': '',
+	});
+	return { from, to, src };
+}
+
+test('reports added, removed and renumbered packets and the protocol move', () => {
+	const { from, to, src } = buildPair();
+	const r = run({ from_dir: from, to_dir: to, packages_src: src });
+	assert.deepEqual(r.diff.protocol, { from: 100, to: 101 });
+	assert.deepEqual(r.diff.packets.added.map((p) => [p.name, p.id]), [['NewPacket', 10]]);
+	assert.deepEqual(r.diff.packets.removed.map((p) => p.name), ['OldPacket']);
+	assert.deepEqual(r.diff.packets.id_changed, [{ name: 'BetaPacket', from: 2, to: 5 }]);
+});
+
+test('separates wire changes from documentation-only changes', () => {
+	const { from, to, src } = buildPair();
+	const r = run({ from_dir: from, to_dir: to, packages_src: src });
+	const changed = Object.fromEntries(r.diff.packets.changed.map((p) => [p.name, p.types]));
+	assert.deepEqual(changed.BetaPacket, ['BetaPacket', 'BetaPacketPayload'], 'its own schema changed with its ID, and its payload gained a field');
+	assert.deepEqual(changed.GammaPacket, ['Level'], 'renumbered enum values are a wire change');
+	assert.equal(changed.AlphaPacket, undefined, 'newly published enum values and prose are documentation only');
+	assert.deepEqual(r.diff.types.annotation_only, ['Mode']);
+});
+
+test('finds new developer notes in subdirectories', () => {
+	const { from, to, src } = buildPair();
+	const r = run({ from_dir: from, to_dir: to, packages_src: src });
+	assert.deepEqual(r.diff.developer_notes.map((n) => n.file), ['r1/b.md']);
+});
+
+test('checks the newer docs against our packages', () => {
+	const { from, to, src } = buildPair();
+	const p = run({ from_dir: from, to_dir: to, packages_src: src }).packages;
+	assert.equal(p.protocol, 100);
+	assert.equal(p.protocol_matches, false);
+	assert.deepEqual(p.missing_classes.map((x) => x.name), ['NewPacket']);
+	assert.deepEqual(p.id_mismatch, [{ name: 'BetaPacket', ours: 2, mojang: 5 }]);
+});
+
+test('orders previews before the release of the same version', () => {
+	const tags = docs.parseLsRemote([
+		'a\trefs/tags/v1.26.61',
+		'b\trefs/tags/v1.26.70-preview.3',
+		'c\trefs/tags/v1.26.60',
+		'd\trefs/tags/v1.26.70-preview.22',
+		'e\trefs/tags/v1.26.70',
+		'f\trefs/tags/not-a-version',
+	].join('\n'));
+	assert.deepEqual(tags.map((t) => t.tag), ['v1.26.60', 'v1.26.61', 'v1.26.70-preview.3', 'v1.26.70-preview.22', 'v1.26.70']);
+	assert.equal(docs.tagForVersion(tags, '1.26.60.5').tag, 'v1.26.60');
+	assert.equal(docs.tagForVersion(tags, '1.26.70').tag, 'v1.26.70');
+	assert.equal(docs.tagForVersion(tags, '1.26.80'), null);
+});
+
+test('every packet class in our packages maps to a ProtocolInfo constant', () => {
+	const info = pkg.readProtocolInfo();
+	const unmapped = pkg.packetClasses().filter((c) => !info.ids.has(pkg.constantStem(c)));
+	assert.deepEqual(unmapped, []);
+	assert.equal(pkg.constantStem('SetPassengerOfBlockPacket'), 'SET_PASSENGER_OF_BLOCK');
+	assert.equal(pkg.constantStem('NPCDialoguePacket'), 'NPC_DIALOGUE');
+});
+
+test('live: Mojang 1.26.50 to 1.26.60 is protocol 2193 to 2225 with the 8 known new packets', { skip: !process.env.RIFTAL_LIVE }, () => {
+	const r = run({ from: 'v1.26.50', to: 'v1.26.60' });
+	assert.deepEqual(r.diff.protocol, { from: 2193, to: 2225 });
+	assert.deepEqual(r.diff.packets.added.map((p) => p.name), [
+		'ClientboundMatchmakingStatePacket', 'ClientboundPlayAudioContentPacket', 'ClientboundStonecutterSetRecipePacket',
+		'ServerboundCursorItemDragPacket', 'ServerboundMatchmakingCancelPacket', 'ServerboundRegisterAudioContentPacket',
+		'ServerboundStonecutterSetRecipePacket', 'SetPassengerOfBlockPacket',
+	]);
+	assert.equal(path.basename(r.to), 'v1.26.60');
+});

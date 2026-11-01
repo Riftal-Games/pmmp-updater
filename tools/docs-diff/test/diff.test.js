@@ -126,6 +126,10 @@ test('orders previews before the release of the same version', () => {
 	assert.equal(docs.tagForVersion(tags, '1.26.80'), null);
 });
 
+test('only version tags reach the cache, so no argument can name another path', () => {
+	for (const bad of ['../..', 'v1.26.60/../../x', 'main', 'v1.26', '']) assert.throws(() => docs.checkout(bad), /not a Mojang docs version tag/);
+});
+
 test('every packet class in our packages maps to a ProtocolInfo constant', () => {
 	const info = pkg.readProtocolInfo();
 	const unmapped = pkg.packetClasses().filter((c) => !info.ids.has(pkg.constantStem(c)));

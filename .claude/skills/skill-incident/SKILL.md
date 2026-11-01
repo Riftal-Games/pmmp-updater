@@ -59,7 +59,7 @@ The repeat incident file lands in a PR of its own that changes nothing else, so 
 A lesson PR may change skills under `.claude/skills/`, tools under `tools/`, their tests and fixtures, and `docs/`, except the protected paths below. It may not:
 
 - touch a protected path. These are the rules that bound lessons, so a lesson changing them would be loosening its own limits:
-  - `CLAUDE.md` or `CLAUDE.local.md` here or anywhere, `.mcp.json`, `.claude/settings.json`, `.claude/hooks/`, `.claude/agents/`, `.claude/commands/`;
+  - `CLAUDE.md` or `CLAUDE.local.md` here or anywhere, `.gitattributes` and `.gitignore` anywhere, `.mcp.json`, `.claude/settings.json`, `.claude/hooks/`, `.claude/agents/`, `.claude/commands/`;
   - `.claude/skills/skill-incident/` (this file) and `.claude/skills/FAILURE-BLOCK.md`;
   - `tools/skills-lint/`, `tools/lesson-guard/` and `tools/test-support/`, which enforce them or every test depends on;
   - `.github/`, which runs the enforcement;
@@ -67,22 +67,30 @@ A lesson PR may change skills under `.claude/skills/`, tools under `tools/`, the
 
   Write a `needs an issue:` line for the steward instead. A change to any of them is a steward decision, and one that widens a power goes to the two-instance panel the root contract requires;
 - widen what any skill, agent or tool is allowed to do;
-- delete, rename away or weaken a test or fixture, or change an existing assertion. A lesson only adds tests. Weakening a test to make a run pass is a hard stop for Nasir;
+- change an existing test file in any way. A lesson adds its regression test in a new `*.test.js` file. A test whose expectation is wrong is fixed by the steward, not by a lesson. Weakening a test to make a run pass is a hard stop for Nasir;
+- weaken a fixture;
 - delete or rename any file.
 
 Package changes belong to a version run, never a lesson.
 
-CI checks these rules mechanically. The `Lesson guard` workflow runs on `pull_request_target`, so it always uses the base branch's copy of itself and of `tools/lesson-guard`, and it never runs the PR's code. It treats a PR as a lesson when any of these holds: the branch name contains `-lesson-`, the PR carries the `lesson` label, or it touches `docs/lessons.md` or `docs/incidents/`. It fails such a PR when:
+CI is a backstop for these rules, not a proof. The `Lesson guard` workflow runs on `pull_request_target`, so it always uses the base branch's copy of itself and of `tools/lesson-guard`, and it never runs the PR's code. It treats a PR as a lesson when any of these holds, in any letter case:
+
+- the branch name contains `-lesson-`;
+- the PR carries the `lesson` label;
+- the PR touches `docs/lessons.md` or `docs/incidents/`.
+
+It fails such a PR when:
 
 - the PR touches a protected path, in any letter case;
 - the PR deletes a file. A rename counts as a deletion;
-- the PR removes a `test(` declaration, an `assert` line or the `node:test` import from a test file.
+- the PR changes a test file that already existed.
 
-Three bounds have no mechanical check and are enforced only by the reviewer reading the diff:
+These bounds have no mechanical check, and only the reviewer reading the diff enforces them:
 
 - the run fix in step 5, because run PRs are not lessons and the guard does not judge them;
 - not widening what a skill, agent or tool may do;
-- not weakening a fixture, as opposed to a test.
+- not weakening a fixture;
+- not weakening assertions by other means, such as non-test code that patches `node:assert` or the code under test so a new test passes vacuously.
 
 A PR that touches a protected path is a steward merge, whoever opened it and whatever its branch is called.
 

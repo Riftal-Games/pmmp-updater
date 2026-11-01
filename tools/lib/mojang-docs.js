@@ -62,6 +62,7 @@ function tagForVersion(tags, version) {
 // A tag is cloned into a temporary folder and renamed into place only once complete, so
 // an interrupted clone never leaves a partial tree that later runs would trust.
 function checkout(tag) {
+	if (!parseTag(tag)) throw new Error(`not a Mojang docs version tag: ${tag}`);
 	const dir = path.join(cacheRoot(), 'mojang-docs', tag);
 	if (fs.existsSync(path.join(dir, COMPLETE_MARKER))) return dir;
 	fs.mkdirSync(path.dirname(dir), { recursive: true });

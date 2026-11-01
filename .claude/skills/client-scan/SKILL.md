@@ -36,10 +36,12 @@ It writes `tools/client-scan/snapshots/<game version>-<package version>.json`. C
 
 - **CURRENT**: our packages speak the client's protocol and version.
 - **CURRENT PROTOCOL**: same protocol number, different version. The boot test decides, because block and item data can differ under one protocol number.
-- **BEHIND**: run `/protocol-update`.
-- **BY VERSION**: Mojang's docs could not be reached, so only version strings were compared. Rerun online before acting.
-
-A **Core lags** line means our packages are ahead of what pmmp-core builds. Players get what pmmp-core builds, so the update is not done until pmmp-core consumes these packages.
+- **CORE BEHIND**: our packages serve the client, but the pmmp-core checkout pins an older version. Players get what pmmp-core builds, so the update is not done until pmmp-core consumes these packages.
+- **BEHIND**: the client speaks a newer protocol than our packages. Run `/protocol-update`.
+- **CLIENT OLDER**: the client is older than our packages. Update the client, not the server.
+- **UNKNOWN PROTOCOL**: Mojang's tag for the client's version names no protocol number. Read that tag's release notes.
+- **UNKNOWN**: the client's version could not be read.
+- **... BY VERSION**: Mojang's docs could not be reached, so only version strings were compared. Rerun online before acting.
 
 ## Read the lists
 

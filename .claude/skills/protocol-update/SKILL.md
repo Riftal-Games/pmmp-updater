@@ -39,7 +39,7 @@ On release day, rerun Stage 1's docs-diff from the last preview tag to the relea
 
 ## Stage 3: Data (release day, needs BDS)
 
-BDS supplies what the schemas cannot: block states, item tables, recipes, creative inventory. `tools/bds` (#3) runs it in a container; downloading BDS accepts Mojang's EULA, which Nasir accepted once (recorded in the decision log). Until #3 lands, follow its issue for the manual steps.
+BDS supplies what the schemas cannot: block states, item tables, recipes, creative inventory. `tools/bds` (#3) runs it in a container. Downloading BDS accepts Mojang's EULA. That is Nasir's act and a hard stop: no agent downloads BDS until `../docs/decision-log.md` records his acceptance. Until #3 lands, follow its issue for the manual steps.
 
 1. Dump protocol info and mapping files from BDS into `packages/bedrock-data`. Copy files, not folders.
 2. Capture a packet trace by joining BDS with the real client through the root workspace's `../devtools/relay.js --upstream 127.0.0.1:<bds port>` on its own `RELAY_PORT`, then run `php tools/generate-bedrock-data-from-packets.php <trace> <packages/bedrock-data>` from pmmp-core.

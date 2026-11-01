@@ -71,7 +71,7 @@ PLAYABLE is never claimed. That is Nasir on a device.
 
 ## Stage 6: Release
 
-1. Open a PR from `bedrock-<version>` to `main` here with `Closes #<issue>`. The approver or the steward merges it; you never merge it yourself. Tag `bedrock-<version>` on the merge commit after it lands. Never rebase.
+1. Open a PR from `bedrock-<version>` to `main` here with `Closes #<issue>`. The approver or the steward merges it; you never merge it yourself. Tag `v<version>` on the merge commit after it lands, never `bedrock-<version>`, which would share its name with the branch. Never rebase.
 2. In pmmp-core: bump the submodule to that tag, bump `BASE_VERSION` in `src/VersionInfo.php` by a **minor** step, and merge through the steward. Record the image tag.
 3. If block or item data changed, tell `riftal-game` which, for `/test-server` before rollout.
 

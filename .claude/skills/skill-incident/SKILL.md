@@ -52,6 +52,8 @@ Separately from the run, so the run's PR stays about the version and the lesson 
 
 If this symptom already has an incident and a merged lesson, the lesson did not hold. Do not write a second patch. Record the repeat in a new incident file that links the first, and hand it to the steward with both incident files. The steward decides whether the approach itself is wrong.
 
+The repeat incident file lands in a PR of its own that changes nothing else, so it passes the lesson guard. The steward's fix is a separate PR that does not touch `docs/incidents/` or `docs/lessons.md`. It is judged by the steward, not the guard, because it will usually touch a protected path.
+
 ## Bounds
 
 A lesson PR may change skills under `.claude/skills/`, tools under `tools/`, their tests and fixtures, and `docs/`, except the protected paths below. It may not:
@@ -76,7 +78,13 @@ CI checks these rules mechanically. The `Lesson guard` workflow runs on `pull_re
 - the PR deletes a file. A rename counts as a deletion;
 - the PR removes a `test(` declaration, an `assert` line or the `node:test` import from a test file.
 
-Reviewers still check by reading. A PR that touches a protected path is a steward merge, whoever opened it and whatever its branch is called.
+Three bounds have no mechanical check and are enforced only by the reviewer reading the diff:
+
+- the run fix in step 5, because run PRs are not lessons and the guard does not judge them;
+- not widening what a skill, agent or tool may do;
+- not weakening a fixture, as opposed to a test.
+
+A PR that touches a protected path is a steward merge, whoever opened it and whatever its branch is called.
 
 ## Budgets that trigger an incident
 

@@ -7,8 +7,38 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// node --test runs each test file in its own process, so removing every directory on
+// that process's exit covers a passing test, a failing one and an uncaught exception
+// alike, without each call site having to clean up after itself.
+const created = new Set();
+
+function removeCreated() {
+	for (const dir of created) {
+		try {
+			fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+			created.delete(dir);
+		} catch (e) {
+			process.stderr.write(`test-support: could not remove ${dir}: ${e.message}\n`);
+		}
+	}
+}
+
+process.on('exit', removeCreated);
+
+// A signal ends the process without 'exit', and the test runner sends one to every test
+// process when it receives SIGINT or SIGTERM itself. The signal is raised again once the
+// directories are gone, so the process still ends the way the sender meant.
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+	process.once(signal, () => {
+		removeCreated();
+		process.kill(process.pid, signal);
+	});
+}
+
 function tempDir(prefix) {
-	return fs.mkdtempSync(path.join(os.tmpdir(), `pmmp-updater-${prefix}-`));
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `pmmp-updater-${prefix}-`));
+	created.add(dir);
+	return dir;
 }
 
 function writeTree(root, files) {

@@ -1,12 +1,21 @@
 #!/usr/bin/env node
 'use strict';
 
-// Fails a lesson PR that reaches past what /skill-incident allows: a protected path, a
-// deleted or renamed-away file, or any change to a test file that already existed.
-// Lessons add tests only in new files, so no reading of a diff is needed to tell
-// whether an existing test was weakened. CI runs the copy of this file on the base
-// branch, from a pull_request_target workflow, so a PR cannot change the guard that
-// judges it. It reads only the list of changed paths and never runs PR code.
+// Judges a lesson PR against what /skill-incident allows, and fails it for reaching
+// past that: a protected path, packages/, a deleted or renamed-away file, or any change
+// to a file that already existed as a *.test.js or under a test/ directory, which holds
+// the helpers and fixtures tests depend on. Lessons add tests and fixtures only in new
+// files, so no reading of a diff is needed to tell whether an existing one was weakened.
+//
+// Every other PR passes. Each protected path it touches is printed as a GitHub Actions
+// notice that the PR needs a steward merge. Nothing under packages/ is flagged, because
+// version runs change it. The check does not fail such a PR, because the steward merges
+// only on fully green CI. What keeps the PR out of the approver's lane is the approver's
+// own gated-path list.
+//
+// CI runs the copy of this file on the base branch, from a pull_request_target
+// workflow, so a PR cannot change the guard that judges it. It reads only the list of
+// changed paths and never runs PR code.
 //
 // Usage: node tools/lesson-guard/check.js --base <ref> --head <ref> [--branch <name>] [--labels <a,b>]
 
@@ -27,15 +36,18 @@ const PROTECTED = [
 	/^tools\/lesson-guard\//,
 	/^tools\/test-support\//,
 	/^\.github\//,
-	/^packages\//,
 ];
 
-const TEST_FILE = /\.test\.js$/i;
+const LESSON_PROTECTED = [/^packages\//];
+
+const TEST_FILE = /(^|\/)test\/|\.test\.js$/i;
 
 // Paths are compared lowercased, because a Windows checkout treats .Claude and .claude
-// as the same folder.
-function isProtected(path) {
+// as the same folder. Outside a lesson nothing under packages/ is protected, not even a
+// package's own .gitattributes or .gitignore, because a version run imports them.
+function isProtected(path, { lesson = true } = {}) {
 	const p = path.toLowerCase();
+	if (LESSON_PROTECTED.some((re) => re.test(p))) return lesson;
 	return PROTECTED.some((re) => re.test(p));
 }
 
@@ -53,6 +65,17 @@ function check(changes) {
 		else if (status !== 'A' && TEST_FILE.test(path)) problems.push(`${path}: changes an existing test file; a lesson adds tests in new files only`);
 	}
 	return problems;
+}
+
+function stewardPaths(changes) {
+	return changes.map(({ path }) => path).filter((path) => isProtected(path, { lesson: false }));
+}
+
+// A workflow command ends at a newline, so a path is escaped the way GitHub Actions
+// expects or a file name could start a command of its own.
+function notice(path) {
+	const msg = `${path}: steward path, this PR needs a steward merge`;
+	return `::notice::${msg.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')}`;
 }
 
 // Parses `git diff --name-status -z --no-renames`. NUL separation keeps paths with
@@ -84,14 +107,16 @@ if (require.main === module) {
 	const out = execFileSync('git', ['-c', 'core.quotePath=false', 'diff', '--name-status', '-z', '--no-renames', '--no-ext-diff', `${args.base}...${args.head}`], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
 	const changes = parseNameStatus(out);
 	const labels = (args.labels || '').split(',').map((s) => s.trim()).filter(Boolean);
-	if (!isLesson({ branch: args.branch, labels, changes })) {
-		process.stdout.write('Not a lesson PR: no -lesson- branch, no lesson label, no change under docs/lessons.md or docs/incidents/.\n');
-		process.exit(0);
+	if (isLesson({ branch: args.branch, labels, changes })) {
+		const problems = check(changes);
+		for (const p of problems) process.stderr.write(`${p}\n`);
+		process.stdout.write(problems.length ? `Lesson bounds: ${problems.length} problem(s).\n` : 'Lesson bounds hold.\n');
+		process.exit(problems.length ? 1 : 0);
 	}
-	const problems = check(changes);
-	for (const p of problems) process.stderr.write(`${p}\n`);
-	process.stdout.write(problems.length ? `Lesson bounds: ${problems.length} problem(s).\n` : 'Lesson bounds hold.\n');
-	process.exit(problems.length ? 1 : 0);
+	const paths = stewardPaths(changes);
+	for (const p of paths) process.stdout.write(`${notice(p)}\n`);
+	process.stdout.write(paths.length ? `Not a lesson PR. It touches ${paths.length} steward path(s), so it needs a steward merge; this check does not block it.\n` : 'Not a lesson PR, and it touches no steward path.\n');
+	process.exit(0);
 }
 
-module.exports = { check, isLesson, isProtected, parseNameStatus, PROTECTED };
+module.exports = { check, isLesson, isProtected, notice, parseNameStatus, stewardPaths, PROTECTED, LESSON_PROTECTED };

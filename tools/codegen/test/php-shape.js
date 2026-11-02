@@ -1,8 +1,8 @@
 'use strict';
 
 // Reduces a PHP class or enum in the package's style to the parts the codegen tests
-// compare: names, fields, signatures and the order of encoding calls. It reads only the
-// layout this package uses, not PHP in general.
+// compare: names, fields, signatures, the order of encoding calls and the field each call
+// reads or writes. It reads only the layout this package uses, not PHP in general.
 
 function stripComments(text) {
 	return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
@@ -55,6 +55,51 @@ function calls(body) {
 	return out;
 }
 
+// Splits a method body at the semicolons outside any bracket, so a closure stays inside
+// the statement that passes it.
+function statements(body) {
+	const out = [];
+	let depth = 0;
+	let start = 0;
+	for (let i = 0; i < body.length; i++) {
+		const c = body[i];
+		if ('({['.includes(c)) depth++;
+		else if (')}]'.includes(c)) depth--;
+		else if (c === ';' && depth === 0) {
+			out.push(body.slice(start, i).trim());
+			start = i + 1;
+		}
+	}
+	return out.filter(Boolean);
+}
+
+// The field each statement reads or writes: the property or local it assigns, or else the
+// first property it mentions. A local named in `new self(...)` stands for the constructor
+// parameter in the same position, so local names do not matter, only where they end up.
+function statementTarget(stmt, locals) {
+	let m = /^\$this->(\w+)\s*=[^=]/.exec(stmt);
+	if (m) return m[1];
+	m = /^\$(\w+)\s*=[^=]/.exec(stmt);
+	if (m) return locals[m[1]] || `$${m[1]}`;
+	m = /\$this->(\w+)/.exec(stmt);
+	return m ? m[1] : null;
+}
+
+// For each call that calls() lists, the field its statement targets.
+function targets(body, ctorParams) {
+	if (body === null) return null;
+	const locals = {};
+	const made = /\bnew\s+self\s*\(/.exec(body);
+	if (made && ctorParams) {
+		const args = parenBlock(body, made.index).inner.split(',').map((a) => a.trim());
+		args.forEach((a, i) => {
+			const local = /^\$(\w+)$/.exec(a);
+			if (local && ctorParams[i] && ctorParams[i].name) locals[local[1]] = ctorParams[i].name;
+		});
+	}
+	return statements(body).flatMap((s) => calls(s).map(() => statementTarget(s, locals)));
+}
+
 function parse(text) {
 	const code = stripComments(text);
 	const ns = (/^namespace\s+([\w\\]+);/m.exec(code) || [])[1] || null;
@@ -72,7 +117,15 @@ function parse(text) {
 	const create = method(classBody, 'create');
 	const id = /const\s+NETWORK_ID\s*=\s*ProtocolInfo::(\w+)\s*;/.exec(classBody);
 	const handle = method(classBody, 'handle');
+	const ctorParams = ctor ? params(ctor.params) : null;
 	const body = (n) => { const m = method(classBody, n); return m ? calls(m.body) : null; };
+	const bodyTargets = (n) => {
+		const m = method(classBody, n);
+		if (!m) return null;
+		const t = targets(m.body, ctorParams);
+		if (t.length !== calls(m.body).length) throw new Error(`${n}: a call outside any statement`);
+		return t;
+	};
 	return {
 		kind: 'class',
 		namespace: ns,
@@ -82,13 +135,17 @@ function parse(text) {
 		implements: cl[4] ? cl[4].split(',').map((s) => s.trim()).sort() : [],
 		networkId: id ? id[1] : null,
 		properties,
-		ctor: ctor ? params(ctor.params) : null,
+		ctor: ctorParams,
 		create: create ? params(create.params) : null,
 		handle: handle ? (/->(handle\w+)\(/.exec(handle.body) || [])[1] || null : null,
 		decode: body('decodePayload'),
 		encode: body('encodePayload'),
 		read: body('read'),
 		write: body('write'),
+		decodeTargets: bodyTargets('decodePayload'),
+		encodeTargets: bodyTargets('encodePayload'),
+		readTargets: bodyTargets('read'),
+		writeTargets: bodyTargets('write'),
 	};
 }
 

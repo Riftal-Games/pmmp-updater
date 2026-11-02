@@ -42,7 +42,6 @@ const USE = {
 	ByteBufferReader: 'pmmp\\encoding\\ByteBufferReader',
 	ByteBufferWriter: 'pmmp\\encoding\\ByteBufferWriter',
 	CommonTypes: `${NS}\\serializer\\CommonTypes`,
-	PacketIntEnumTrait: `${TYPES_NS}\\PacketIntEnumTrait`,
 };
 
 // Calls per wire type, with % standing for read or write: fixed width little endian by
@@ -250,33 +249,67 @@ class Generator {
 		if (item.todo) return todoType(item.todo);
 		if (item.embedded) return todoType(this.note(where, 'an array of embedded packets'));
 		return {
-			php: 'array', element: item.php, uses: [USE.CommonTypes, ...item.uses],
+			php: 'array', element: item.php, uses: [USE.CommonTypes, ...item.uses], marker: item.marker,
 			read: (i) => `CommonTypes::readList(${i}, ${readerFn(item)})`,
 			write: (o, v) => `CommonTypes::writeList(${o}, ${v}, ${writerFn(item)})`,
 		};
 	}
 
+	// Under Enum-as-Value an enum goes on the wire as its binary value in x-underlying-type.
+	// Without it, Mojang's serializer sends the enum's name as a string (developer note
+	// r26u0/bug_1526431), which the package reads through a string-backed enum.
 	enumType(prop, enumSchema, wanted, ctx, key) {
 		const where = `${ctx.owner}.${ctx.field}`;
-		const name = this.claim(wanted, key, enumSchema.title);
-		const ut = prop['x-underlying-type'] || enumSchema['x-underlying-type'];
 		const opts = options(prop);
+		const asValue = opts.has('enum-as-value');
+		const name = this.claim(wanted, key, enumSchema.title);
+		const held = this.types.get(name);
+		if (held && held.asValue !== asValue) {
+			const how = (v) => (v ? 'its value' : 'its name');
+			return todoType(this.note(where, `enum ${name} is sent as ${how(asValue)} here and as ${how(held.asValue)} elsewhere; one PHP enum cannot be backed by both`));
+		}
+		const t = asValue ? this.valueEnum(name, enumSchema, prop, opts, where, key) : this.nameEnum(name, enumSchema, opts, where, key);
+		if (t.todo) return t;
+		if (opts.has('allowunknownenumvalues')) t.marker = this.note(where, `${name} allows unknown values, which fromPacket rejects`);
+		return t;
+	}
+
+	valueEnum(name, enumSchema, prop, opts, where, key) {
+		const ut = prop['x-underlying-type'] || enumSchema['x-underlying-type'];
 		const num = this.numeric(ut, opts, where);
-		if (!num || num.todo || num.php !== 'int') return todoType(this.note(where, `enum ${name} has no integer wire type (${ut})`));
+		if (num && num.todo) return num;
+		if (!num || num.php !== 'int') return todoType(this.note(where, `enum ${name} has no integer wire type (${ut})`));
 		if (!this.types.has(name)) {
 			const values = enumSchema['x-enum-binary-value'];
 			const published = Array.isArray(values) && values.length === enumSchema.enum.length;
 			if (!published) this.note(name, 'enum values not published; index order assumed');
-			this.types.set(name, { kind: 'enum', key });
-			this.files.set(`types/${name}.php`, renderEnum(name, enumSchema.enum.map((v, i) => [upperSnake(v), published ? values[i] : i]), !published));
+			this.types.set(name, { kind: 'enum', key, asValue: true });
+			const cases = enumSchema.enum.map((v, i) => [upperSnake(v), published ? values[i] : i]);
+			this.files.set(`types/${name}.php`, renderEnum(name, 'int', 'PacketIntEnumTrait', cases, !published));
 		}
-		if (opts.has('allowunknownenumvalues')) this.note(where, `${name} allows unknown values, which fromPacket rejects`);
 		const read = num.readCallable;
 		const write = num.writeCallable;
 		return {
 			php: name, uses: [...num.uses, `${TYPES_NS}\\${name}`],
 			read: (i) => `${name}::fromPacket(${read}(${i}))`,
 			write: (o, v) => `${write}(${o}, ${v}->value)`,
+		};
+	}
+
+	// The package's pattern for an enum sent by name: PersonaSkinPieceType in
+	// CommonTypes::getSkin, read with fromPacket(getString) and written as ->value.
+	nameEnum(name, enumSchema, opts, where, key) {
+		const extra = [...opts].filter((o) => o !== 'allowunknownenumvalues');
+		if (extra.length) return todoType(this.note(where, `enum ${name} is sent as its name, with ${extra.join(', ')}, which the package has no pattern for`));
+		if (!this.types.has(name)) {
+			this.types.set(name, { kind: 'enum', key, asValue: false });
+			const cases = enumSchema.enum.map((v) => [upperSnake(v), phpString(v)]);
+			this.files.set(`types/${name}.php`, renderEnum(name, 'string', 'PacketOrdinalEnumTrait', cases, false));
+		}
+		return {
+			php: name, uses: [USE.CommonTypes, `${TYPES_NS}\\${name}`],
+			read: (i) => `${name}::fromPacket(CommonTypes::getString(${i}))`,
+			write: (o, v) => `CommonTypes::putString(${o}, ${v}->value)`,
 		};
 	}
 
@@ -303,8 +336,10 @@ class Generator {
 		const sorted = ordered ? [...props].sort((a, b) => a[1]['x-ordinal-index'] - b[1]['x-ordinal-index']) : props;
 		const out = { list: [], todos: [] };
 		for (const [field, prop] of sorted) {
-			const type = this.resolve(prop, { ...ctx, field });
-			out.list.push({ field, name: camel(field), type, optional: !required.has(field) });
+			const optional = !required.has(field);
+			let type = this.resolve(prop, { ...ctx, field });
+			if (optional && type.embedded) type = todoType(this.note(`${ctx.owner}.${field}`, 'an optional embedded packet'));
+			out.list.push({ field, name: camel(field), type, optional });
 		}
 		if (!ordered && props.length > 1) out.todos.push('field order not given by x-ordinal-index; schema order used');
 		return out;
@@ -350,25 +385,25 @@ function writerFn(t) {
 	return `static fn(ByteBufferWriter $out, ${t.php} ${v}) => ${t.write('$out', v)}`;
 }
 
+// A type drafted in full that still needs a decision carries a marker, written above each
+// statement that reads or writes it.
+function marked(f, stmts) {
+	return f.type.marker ? [`// ${TODO}: ${f.field}: ${f.type.marker}`, ...stmts] : stmts;
+}
+
 function readStmts(f, target) {
 	const t = f.type;
 	if (t.todo) return [`// ${TODO}: ${f.field}: ${t.todo}`];
-	if (f.optional) {
-		if (t.embedded) return [`// ${TODO}: ${f.field}: an optional embedded packet`];
-		return [`${target} = CommonTypes::readOptional($in, ${readerFn(t)});`];
-	}
+	if (f.optional) return marked(f, [`${target} = CommonTypes::readOptional($in, ${readerFn(t)});`]);
 	if (t.readStmts) return t.readStmts(target, '$in');
-	return [`${target} = ${t.read('$in')};`];
+	return marked(f, [`${target} = ${t.read('$in')};`]);
 }
 
 function writeStmts(f, value) {
 	const t = f.type;
 	if (t.todo) return [`// ${TODO}: ${f.field}: ${t.todo}`];
-	if (f.optional) {
-		if (t.embedded) return [`// ${TODO}: ${f.field}: an optional embedded packet`];
-		return [`CommonTypes::writeOptional($out, ${value}, ${writerFn(t)});`];
-	}
-	return [`${t.write('$out', value)};`];
+	if (f.optional) return marked(f, [`CommonTypes::writeOptional($out, ${value}, ${writerFn(t)});`]);
+	return marked(f, [`${t.write('$out', value)};`]);
 }
 
 function usesOf(fields, base, namespace) {
@@ -454,12 +489,16 @@ function renderTypeClass(name, fields) {
 	return out.join('\n');
 }
 
-function renderEnum(name, cases, assumed) {
+function phpString(value) {
+	return `'${String(value).replace(/[\\']/g, (c) => `\\${c}`)}'`;
+}
+
+function renderEnum(name, backing, trait, cases, assumed) {
 	const out = [];
 	out.push(HEADER);
 	out.push(`namespace ${TYPES_NS};\n`);
-	out.push(`${assumed ? `// ${TODO}: enum values not published; index order assumed\n` : ''}enum ${name} : int{`);
-	out.push('\tuse PacketIntEnumTrait;\n');
+	out.push(`${assumed ? `// ${TODO}: enum values not published; index order assumed\n` : ''}enum ${name} : ${backing}{`);
+	out.push(`\tuse ${trait};\n`);
 	out.push(cases.map(([c, v]) => `\tcase ${c} = ${v};`).join('\n'));
 	out.push('}\n');
 	return out.join('\n');

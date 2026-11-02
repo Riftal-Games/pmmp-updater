@@ -47,6 +47,31 @@ test('any change to an existing test file is refused, in any status but A', () =
 	assert.deepEqual(check([{ status: 'A', path: 'tools/x/test/new.test.js' }]), []);
 });
 
+test('a PR that is not a lesson is refused for protected paths other than packages/', () => {
+	const changes = [
+		{ status: 'M', path: 'tools/lesson-guard/check.js' },
+		{ status: 'M', path: '.claude/skills/Skill-Incident/SKILL.md' },
+		{ status: 'M', path: 'packages/bedrock-protocol/src/ProtocolInfo.php' },
+		{ status: 'D', path: 'packages/bedrock-data/old.json' },
+		{ status: 'M', path: 'tools/x/test/x.test.js' },
+		{ status: 'D', path: 'tools/x/test/fixture.json' },
+	];
+	assert.deepEqual(check(changes, { lesson: false }), [
+		'tools/lesson-guard/check.js: protected path, needs a steward merge',
+		'.claude/skills/Skill-Incident/SKILL.md: protected path, needs a steward merge',
+	]);
+	assert.ok(!isProtected('packages/bedrock-data/README.md', { lesson: false }));
+	assert.ok(isProtected('.github/workflows/ci.yml', { lesson: false }));
+});
+
+test('any change to an existing file under a test/ directory is refused in a lesson', () => {
+	for (const p of ['tools/x/test/helpers.js', 'tools/x/test/fixtures/schema.json', 'tools/x/Test/data.bin', 'test/top.js']) {
+		assert.deepEqual(check([{ status: 'M', path: p }]), [`${p}: changes an existing test file; a lesson adds tests in new files only`], p);
+	}
+	assert.deepEqual(check([{ status: 'A', path: 'tools/x/test/fixtures/new.json' }]), []);
+	assert.deepEqual(check([{ status: 'M', path: 'tools/latest/x.js' }, { status: 'M', path: 'tools/x/testing.js' }]), []);
+});
+
 test('lessons are recognised by branch, label or the files they touch, in any case', () => {
 	const none = [{ status: 'M', path: 'tools/docs-diff/diff.js' }];
 	assert.ok(isLesson({ branch: 'updater/9-lesson-x', labels: [], changes: none }));
@@ -72,13 +97,18 @@ function repoWith(files) {
 	return { dir, git };
 }
 
-function runGuard(dir) {
+function guard(dir, branch) {
 	try {
-		execFileSync('node', [CHECK, '--base', 'main', '--head', 'HEAD', '--branch', 'updater/9-lesson-x'], { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
-		return { code: 0, err: '' };
+		const out = execFileSync('node', [CHECK, '--base', 'main', '--head', 'HEAD', '--branch', branch], { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+		return { code: 0, out, err: '' };
 	} catch (e) {
-		return { code: e.status, err: e.stderr };
+		return { code: e.status, out: e.stdout, err: e.stderr };
 	}
+}
+
+function runGuard(dir) {
+	const { code, err } = guard(dir, 'updater/9-lesson-x');
+	return { code, err };
 }
 
 const EXISTING_TEST = { 'tools/x/test/x.test.js': "const test = require('node:test');\nconst assert = require('node:assert');\ntest('a', () => {\n\tassert.ok(true);\n});\n" };
@@ -128,4 +158,35 @@ test('a new test file in a lesson passes end to end', () => {
 	git('add', '-A');
 	git('commit', '-q', '-m', 'lesson');
 	assert.deepEqual(runGuard(dir), { code: 0, err: '' });
+});
+
+test('a PR that is not a lesson and rewrites the guard is refused end to end, naming the steward', () => {
+	const { dir, git } = repoWith({ 'tools/lesson-guard/check.js': 'process.exit(1);\n' });
+	fs.writeFileSync(path.join(dir, 'tools/lesson-guard/check.js'), 'process.exit(0);\n');
+	git('commit', '-q', '-am', 'guard');
+	const r = guard(dir, 'updater/10-tidy');
+	assert.equal(r.code, 1);
+	assert.match(r.err, /tools\/lesson-guard\/check\.js: protected path, needs a steward merge/);
+	assert.match(r.out, /needs a steward merge/);
+});
+
+test('a version run that changes packages/ and existing tests passes end to end', () => {
+	const { dir, git } = repoWith({ ...EXISTING_TEST, 'packages/bedrock-protocol/src/ProtocolInfo.php': '<?php\n', 'packages/bedrock-data/old.json': '{}\n' });
+	fs.writeFileSync(path.join(dir, 'packages/bedrock-protocol/src/ProtocolInfo.php'), '<?php\n// 2225\n');
+	fs.writeFileSync(path.join(dir, 'tools/x/test/x.test.js'), "const test = require('node:test');\ntest('a', () => {});\n");
+	git('rm', '-q', 'packages/bedrock-data/old.json');
+	git('commit', '-q', '-am', 'version');
+	const r = guard(dir, 'bedrock-1.26.70');
+	assert.equal(r.code, 0, r.err);
+	assert.match(r.out, /Not a lesson PR, and it touches no protected path/);
+});
+
+test('a weakened fixture under test/ in a lesson is caught end to end', () => {
+	const { dir, git } = repoWith({ 'tools/x/test/fixtures/schema.json': '{"id": 7}\n', 'docs/lessons.md': '# Lessons\n' });
+	fs.writeFileSync(path.join(dir, 'tools/x/test/fixtures/schema.json'), '{}\n');
+	fs.appendFileSync(path.join(dir, 'docs', 'lessons.md'), '- a lesson\n');
+	git('commit', '-q', '-am', 'lesson');
+	const r = runGuard(dir);
+	assert.equal(r.code, 1);
+	assert.match(r.err, /tools\/x\/test\/fixtures\/schema\.json: changes an existing test file/);
 });

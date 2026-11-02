@@ -42,7 +42,7 @@ On release day, rerun Stage 1's docs-diff from the last preview tag to the relea
 BDS supplies what the schemas cannot: block states, item tables, recipes, creative inventory. `tools/bds` (#3) runs it in a container. Downloading BDS accepts Mojang's EULA. That is Nasir's act and a hard stop: no agent downloads BDS until `../docs/decision-log.md` records his acceptance. Until #3 lands, follow its issue for the manual steps.
 
 1. Dump protocol info and mapping files from BDS into `packages/bedrock-data`. Copy files, not folders.
-2. Capture a packet trace by joining BDS with the real client through the root workspace's `../devtools/relay.js --upstream 127.0.0.1:<bds port>` on its own `RELAY_PORT`, then run `php tools/generate-bedrock-data-from-packets.php <trace> <packages/bedrock-data>` from pmmp-core.
+2. Capture a packet trace with the decrypting tracer from `tools/bds` (#3), which writes the `read:` and `write:` base64 lines the generator expects. Join BDS with the real client through the root workspace's `../devtools/relay.js --upstream 127.0.0.1:<bds port>` on its own `RELAY_PORT`; the relay only carries the client to BDS, forwards encrypted RakNet and writes no file. Then run `php tools/generate-bedrock-data-from-packets.php <trace> <packages/bedrock-data>` from pmmp-core.
 3. In `packages/bedrock-protocol`, run `php tools/update-from-bedrock-data.php` and the other `tools/generate-*.php` scripts the new data needs.
 4. Block upgrade schema: run pmmp-core's `tools/blockstate-upgrade-schema-utils.php` on the new `*_to_current_block_map.bin` and add the output to `packages/bedrock-block-upgrade-schema/nbt_upgrade_schema/` under the next number.
 5. Item upgrade schema: run pmmp-core's `tools/generate-item-upgrade-schema.php` and add the output to `packages/bedrock-item-upgrade-schema/id_meta_upgrade_schema/` under the next number.
@@ -51,7 +51,7 @@ BDS supplies what the schemas cannot: block states, item tables, recipes, creati
 
 Core changes go in pmmp-core on `bedrock-<version>`. `src/` changes are gated to the steward.
 
-1. Point pmmp-core at this branch's packages with `install-local-protocol.sh` pointed at `packages/`, or bump the submodule once PocketMine-MP#276 lands.
+1. Point pmmp-core at this branch's packages. pmmp-core resolves the four packages from its `deps/pmmp-updater` submodule through composer `path` repositories (PocketMine-MP#281). During a version run, push `bedrock-<version>` here, then in pmmp-core move the submodule to that branch's head with `git -C deps/pmmp-updater fetch origin bedrock-<version>` and `git -C deps/pmmp-updater checkout FETCH_HEAD`, update the four `options.versions` entries and the `require` constraints in `composer.json`, and run the `composer update` of the four `axolotl-pm/*` packages in a PHP container, never on the host. pmmp-core's `/protocol-update`, step 2, has the exact commands.
 2. Update `src/data/bedrock/block` and `src/data/bedrock/item` for new or changed types, then `composer update-codegen`.
 3. `src/data/bedrock/WorldDataVersions.php`: `LAST_OPENED_IN` and `NETWORK` change every version. `BLOCK_STATES` changes often. `CHUNK`, `SUBCHUNK` and `STORAGE` rarely do.
 4. `vendor/bin/phpstan analyze` until clean, `vendor/bin/phpunit tests/phpunit` until green.

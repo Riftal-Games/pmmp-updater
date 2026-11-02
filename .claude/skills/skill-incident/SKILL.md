@@ -52,7 +52,7 @@ Separately from the run, so the run's PR stays about the version and the lesson 
 
 If this symptom already has an incident and a merged lesson, the lesson did not hold. Do not write a second patch. Record the repeat in a new incident file that links the first, and hand it to the steward with both incident files. The steward decides whether the approach itself is wrong.
 
-The repeat incident file lands in a PR of its own that changes nothing else, so it passes the lesson guard. The steward's fix is a separate PR that does not touch `docs/incidents/` or `docs/lessons.md`. It is judged by the steward, not the guard, because it will usually touch a protected path.
+The repeat incident file lands in a PR of its own that changes nothing else, so it passes the lesson guard. The steward decides the fix, and an implementer writes it in a separate PR that does not touch `docs/incidents/` or `docs/lessons.md`. The steward merges that PR, because it will usually touch a protected path, which fails the guard.
 
 ## Bounds
 
@@ -67,7 +67,7 @@ A lesson PR may change skills under `.claude/skills/`, tools under `tools/`, the
 
   Write a `needs an issue:` line for the steward instead. A change to any of them is a steward decision, and one that widens a power goes to the two-instance panel the root contract requires;
 - widen what any skill, agent or tool is allowed to do;
-- change an existing test file in any way. A lesson adds its regression test in a new `*.test.js` file. A test whose expectation is wrong is fixed by the steward, not by a lesson. Weakening a test to make a run pass is a hard stop for Nasir;
+- change an existing test file in any way, which includes every file under a `test/` directory. A lesson adds its regression test in a new `*.test.js` file. A test whose expectation is wrong is corrected in a steward-merged PR, not by a lesson. Weakening a test to make a run pass is a hard stop for Nasir;
 - weaken a fixture;
 - delete or rename any file.
 
@@ -83,13 +83,15 @@ It fails such a PR when:
 
 - the PR touches a protected path, in any letter case;
 - the PR deletes a file. A rename counts as a deletion;
-- the PR changes a test file that already existed.
+- the PR changes a `*.test.js` file or any file under a `test/` directory that already existed, so a helper or fixture cannot be weakened either.
+
+It fails every other PR that touches a protected path other than `packages/`, with a message that it needs a steward merge. Version runs change `packages/`, so that path is judged only for lessons.
 
 These bounds have no mechanical check, and only the reviewer reading the diff enforces them:
 
-- the run fix in step 5, because run PRs are not lessons and the guard does not judge them;
+- the rest of the run fix in step 5, because run PRs are not lessons and the guard judges only their protected paths;
 - not widening what a skill, agent or tool may do;
-- not weakening a fixture;
+- not weakening a fixture kept outside a `test/` directory;
 - not weakening assertions by other means, such as non-test code that patches `node:assert` or the code under test so a new test passes vacuously.
 
 A PR that touches a protected path is a steward merge, whoever opened it and whatever its branch is called.

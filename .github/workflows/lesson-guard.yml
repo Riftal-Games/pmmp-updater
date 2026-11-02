@@ -1,0 +1,40 @@
+name: Lesson guard
+
+# pull_request_target runs this file as it is on the base branch, with the base
+# branch checked out, so a PR cannot edit the workflow or the guard that judges it.
+# The PR's head is read only as git objects to diff against. No code from the PR is
+# ever executed here, which is what makes pull_request_target safe to use. Forking is
+# disabled on this repository, so every PR head is a branch here, and the full-history
+# checkout already holds its commits without a second, authenticated fetch.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lesson-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  bounds:
+    name: lesson bounds
+    runs-on: [self-hosted, linux, riftal]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Judge the diff with the base branch's guard
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          git cat-file -e "$HEAD_SHA^{commit}"
+          node tools/lesson-guard/check.js --base "$BASE_SHA" --head "$HEAD_SHA" --branch "$BRANCH" --labels "$LABELS"

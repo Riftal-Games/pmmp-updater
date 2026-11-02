@@ -1,0 +1,5 @@
+# The global excludes file on Nasir's machine ignores CLAUDE.md and .claude/. This
+# repository's skills and instructions live there, so they are re-included here, where
+# a repository .gitignore takes precedence over the global one.
+!CLAUDE.md
+!.claude/

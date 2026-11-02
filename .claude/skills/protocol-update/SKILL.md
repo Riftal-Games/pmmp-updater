@@ -58,7 +58,7 @@ Core changes go in pmmp-core on `bedrock-<version>`. `src/` changes are gated to
 
 ## Stage 5: Verify
 
-Run `/verify` (`node tools/verify/verify.js --core <pmmp-core dir>`) for items 1 to 3. Each verdict is reported separately on the PR, never in chat:
+Run `/verify` (`node tools/verify/verify.js --core <pmmp-core dir>`) for items 1 and 3, and for LOADS with no plugins; item 2, LOADS with every riftal-game plugin, is still a separate check. Each verdict is reported separately on the PR, never in chat:
 
 1. BUILDS: the image builds from the working branches.
 2. LOADS: Done with every riftal-game plugin, no exception in the log.

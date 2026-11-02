@@ -10,6 +10,9 @@
 // temporary tree, so the checkout itself is never touched and its uncommitted edits are
 // not built. The packages are this checkout's working tree, uncommitted edits included,
 // because that is what a version run needs to try before it commits.
+//
+// LOADS boots with no plugins, so it is not the LOADS a protocol update owes with every
+// riftal-game plugin enabled.
 
 const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
@@ -31,6 +34,12 @@ const POCKETMINE_ARGS = '--settings.enable-dev-builds=1 --auto-report.enabled=0 
 
 const MINUTE = 60 * 1000;
 const TIMEOUTS = { build: 60 * MINUTE, server: 10 * MINUTE, cli: 2 * MINUTE };
+
+const LOADS = 'LOADS (no plugins)';
+const SIGNALS = ['SIGINT', 'SIGTERM'];
+// Docker answers "No such object" for a container and "no such volume" for a volume.
+// Any other failure, a timeout included, says nothing about whether the thing is gone.
+const GONE = /no such/i;
 
 class UsageError extends Error {}
 
@@ -127,6 +136,95 @@ function pinProtocol(script, protocol) {
 	const hits = [...script.matchAll(re)];
 	if (hits.length !== 1) throw new Error(`expected one EXPECTED_PROTOCOL="<n>" line in ${SMOKE_SCRIPT}, found ${hits.length}`);
 	return { text: script.replace(re, `EXPECTED_PROTOCOL="${protocol}"`), pinned: Number(hits[0][1]) };
+}
+
+// Every image a build of this Dockerfile would pull: FROM and --from references that
+// are not one of its own stages, and the syntax frontend. A reference built from an ARG
+// cannot be resolved without building, so it is returned as unresolved.
+function baseImages(dockerfile) {
+	const lines = dockerfile.split(/\r?\n/);
+	const stages = new Set();
+	const images = new Set();
+	const unresolved = new Set();
+	const want = (ref) => {
+		if (ref.includes('$')) unresolved.add(ref);
+		else if (ref.toLowerCase() !== 'scratch' && !stages.has(ref.toLowerCase()) && !/^\d+$/.test(ref)) images.add(ref);
+	};
+	for (const line of lines) {
+		if (!line.startsWith('#')) break;
+		const syntax = /^#\s*syntax\s*=\s*(\S+)/i.exec(line);
+		if (syntax) want(syntax[1]);
+	}
+	for (const line of lines) {
+		const from = /^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?/i.exec(line);
+		if (from) {
+			want(from[1]);
+			if (from[2]) stages.add(from[2].toLowerCase());
+			continue;
+		}
+		for (const m of line.matchAll(/--from=([^\s,]+)/g)) want(m[1]);
+		for (const m of line.matchAll(/--mount=\S*?\bfrom=([^\s,]+)/g)) want(m[1]);
+	}
+	return { images: [...images], unresolved: [...unresolved] };
+}
+
+function normaliseRepo(repo) {
+	return repo.replace(/^docker\.io\//, '').replace(/^library\//, '');
+}
+
+function parseRef(ref) {
+	const at = ref.indexOf('@');
+	const digest = at === -1 ? null : ref.slice(at + 1);
+	const named = at === -1 ? ref : ref.slice(0, at);
+	const colon = named.lastIndexOf(':');
+	const hasTag = colon > named.lastIndexOf('/');
+	return { repo: normaliseRepo(hasTag ? named.slice(0, colon) : named), tag: hasTag ? named.slice(colon + 1) : (digest ? null : 'latest'), digest };
+}
+
+// Reads a docker-style `images --digests` table. Returns null when the header does not
+// name the columns, because then nothing in it can be trusted.
+function parseImageTable(text) {
+	const lines = text.replace(ANSI, '').split(/\r?\n/).filter((l) => l.trim());
+	if (!lines.length) return null;
+	const head = lines[0].trim().split(/\s{2,}/);
+	const col = { repo: head.indexOf('REPOSITORY'), tag: head.indexOf('TAG'), digest: head.indexOf('DIGEST') };
+	if (col.repo === -1 || col.tag === -1) return null;
+	const rows = lines.slice(1).map((l) => {
+		const c = l.trim().split(/\s{2,}/);
+		return { repo: normaliseRepo(c[col.repo] || ''), tag: c[col.tag] || '', digest: col.digest === -1 ? null : c[col.digest] || '' };
+	});
+	return { rows, digests: col.digest !== -1 };
+}
+
+// Returns one reason per image the listing does not prove present. A digest-pinned
+// reference is present only under that digest: the same tag at another digest is pulled.
+function missingImages(table, refs) {
+	const missing = [];
+	for (const ref of refs) {
+		const want = parseRef(ref);
+		if (want.digest && !table.digests) {
+			missing.push(`${ref}: the listing has no DIGEST column to confirm it`);
+			continue;
+		}
+		const hit = table.rows.some((r) => r.repo === want.repo && (want.digest ? r.digest === want.digest : r.tag === want.tag));
+		if (!hit) missing.push(`${ref}: not listed`);
+	}
+	return missing;
+}
+
+// wslc wedged the whole container service on 2026-09-27 while pulling an image it did not
+// have, so it builds only when every image the Dockerfile names is already local.
+async function checkWslcImages({ run, eng, dockerfile }) {
+	const { images, unresolved } = baseImages(dockerfile);
+	if (unresolved.length) return `docker/Dockerfile names ${unresolved.join(', ')}, which cannot be checked without building`;
+	const r = await run([...eng.cli, 'images', '--digests'], { timeoutMs: TIMEOUTS.cli });
+	if (r.timedOut) return `wslc images --digests did not answer within ${TIMEOUTS.cli / MINUTE} minutes`;
+	if (r.code !== 0) return `wslc images --digests exited ${r.code}: ${lastMatching(r.output, /./)}`;
+	const table = parseImageTable(r.output);
+	if (!table) return `wslc images --digests printed no REPOSITORY and TAG header: ${lastMatching(r.output, /./)}`;
+	const missing = missingImages(table, images);
+	if (missing.length) return `the build would pull what wslc does not have: ${missing.join('; ')}`;
+	return null;
 }
 
 function toWslPath(p) {
@@ -228,7 +326,8 @@ function copyPackages(updater, dest) {
 }
 
 // Fills tmp with the build tree. Throws with the reason when the commit cannot be
-// built against these packages.
+// built against these packages. A smoke script that cannot be pinned stops only
+// REACHABLE, so it comes back as smoke.error instead.
 function prepareTree({ core, coreSha, updater, tmp, protocol }) {
 	const composerJson = git(core, ['show', `${coreSha}:composer.json`]).toString('utf8');
 	let dockerfile;
@@ -270,21 +369,34 @@ function prepareTree({ core, coreSha, updater, tmp, protocol }) {
 	}
 
 	const scriptFile = path.join(tmp, ...SMOKE_SCRIPT.split('/'));
-	if (!fs.existsSync(scriptFile)) throw new Error(`pmmp-core ${coreSha} has no ${SMOKE_SCRIPT} to run REACHABLE with`);
-	const pinned = pinProtocol(fs.readFileSync(scriptFile, 'utf8'), protocol);
-	fs.writeFileSync(scriptFile, pinned.text, { mode: 0o755 });
-	return { names, copied, pinned: pinned.pinned };
+	let smoke;
+	if (!fs.existsSync(scriptFile)) {
+		smoke = { error: `pmmp-core ${coreSha} has no ${SMOKE_SCRIPT} to run REACHABLE with` };
+	} else {
+		try {
+			const pinned = pinProtocol(fs.readFileSync(scriptFile, 'utf8'), protocol);
+			fs.writeFileSync(scriptFile, pinned.text, { mode: 0o755 });
+			smoke = { pinned: pinned.pinned };
+		} catch (e) {
+			smoke = { error: e.message };
+		}
+	}
+	return { names, copied, dockerfile, smoke };
 }
 
-function spawnRunner(argv, { input = null, timeoutMs = TIMEOUTS.cli, echo = false } = {}) {
+// Every call has a timeout, so a wedged engine costs minutes, not the machine. An
+// aborted signal terminates the child.
+function spawnRunner(argv, { input = null, timeoutMs = TIMEOUTS.cli, echo = false, signal = null } = {}) {
 	return new Promise((resolve) => {
 		let settled = false;
 		let timedOut = false;
 		const chunks = [];
+		const onAbort = () => child.kill();
 		const finish = (code, extra = '') => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			if (signal) signal.removeEventListener('abort', onAbort);
 			resolve({ code, output: Buffer.concat(chunks).toString('utf8') + extra, timedOut });
 		};
 		const child = spawn(argv[0], argv.slice(1), { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
@@ -292,6 +404,10 @@ function spawnRunner(argv, { input = null, timeoutMs = TIMEOUTS.cli, echo = fals
 			timedOut = true;
 			child.kill('SIGKILL');
 		}, timeoutMs);
+		if (signal) {
+			if (signal.aborted) child.kill();
+			else signal.addEventListener('abort', onAbort, { once: true });
+		}
 		const take = (c) => {
 			chunks.push(c);
 			if (echo) process.stderr.write(c);
@@ -315,8 +431,36 @@ function fail(name, evidence) {
 	return { name, pass: false, evidence };
 }
 
-async function exists(run, eng, args) {
-	return (await run([...eng.cli, ...args], { timeoutMs: TIMEOUTS.cli })).code === 0;
+async function presence(run, eng, args) {
+	const r = await run([...eng.cli, ...args], { timeoutMs: TIMEOUTS.cli });
+	if (r.code === 0) return { state: 'present' };
+	if (!r.timedOut && GONE.test(r.output)) return { state: 'gone' };
+	return { state: 'unknown', why: r.timedOut ? `${args.join(' ')} did not answer within ${TIMEOUTS.cli / MINUTE} minutes` : `${args.join(' ')} exited ${r.code}: ${lastMatching(r.output, /./)}` };
+}
+
+// Removes the containers, then the volumes, then asks the engine about each one. Only an
+// explicit "no such" counts as gone.
+async function removeAll(run, eng, { containers = [], volumes = [], stop = false }) {
+	for (const c of containers) {
+		if (stop) await run([...eng.cli, 'stop', c], { timeoutMs: TIMEOUTS.cli });
+		await run([...eng.cli, 'rm', '-v', c], { timeoutMs: TIMEOUTS.cli });
+	}
+	for (const v of volumes) await run([...eng.cli, 'volume', 'rm', v], { timeoutMs: TIMEOUTS.cli });
+	const left = { present: [], unsure: [] };
+	const checks = [...containers.map((c) => ['container', c, ['inspect', c]]), ...volumes.map((v) => ['volume', v, ['volume', 'inspect', v]])];
+	for (const [kind, name, args] of checks) {
+		const p = await presence(run, eng, args);
+		if (p.state === 'present') left.present.push(`${kind} ${name}`);
+		else if (p.state === 'unknown') left.unsure.push(`${kind} ${name} (${p.why})`);
+	}
+	return left;
+}
+
+function leftText({ present, unsure }) {
+	const parts = [];
+	if (present.length) parts.push(`left behind: ${present.join(', ')}`);
+	if (unsure.length) parts.push(`possibly left behind, could not check: ${unsure.join(', ')}`);
+	return parts.join('; ');
 }
 
 async function builds({ run, eng, tmp, coreSha, tag, identity }) {
@@ -334,43 +478,48 @@ async function builds({ run, eng, tmp, coreSha, tag, identity }) {
 	return { id, verdict: { name: 'BUILDS', pass: true, evidence: `${tag} is ${id}, built from ${identity}` } };
 }
 
-async function loads({ run, eng, id, base }) {
+async function loads({ run, eng, id, base, s }) {
 	const container = `${base}_loads`;
 	const volumes = [`${container}_data`, `${container}_plugins`];
-	const leftovers = [];
+	let left = { present: [], unsure: [] };
 	let setup = null;
 	let r = { code: null, output: '', timedOut: false };
 	try {
 		for (const vol of volumes) {
+			s.made.volumes.add(vol);
 			const created = await run([...eng.cli, 'volume', 'create', vol], { timeoutMs: TIMEOUTS.cli });
 			if (created.code !== 0) {
 				setup = `volume create ${vol} failed: ${lastMatching(created.output, /./)}`;
 				break;
 			}
 		}
-		if (setup === null) r = await run([...eng.cli, 'run', '--name', container, '-i', '-v', `${volumes[0]}:/data`, '-v', `${volumes[1]}:/plugins`, '-e', `POCKETMINE_ARGS=${POCKETMINE_ARGS}`, id], { input: 'stop\n', timeoutMs: TIMEOUTS.server });
+		if (setup === null) {
+			s.made.containers.add(container);
+			r = await run([...eng.cli, 'run', '--name', container, '-i', '-v', `${volumes[0]}:/data`, '-v', `${volumes[1]}:/plugins`, '-e', `POCKETMINE_ARGS=${POCKETMINE_ARGS}`, id], { input: 'stop\n', timeoutMs: TIMEOUTS.server });
+		}
 	} finally {
-		if (r.timedOut) await run([...eng.cli, 'stop', container], { timeoutMs: TIMEOUTS.cli });
-		await run([...eng.cli, 'rm', '-v', container], { timeoutMs: TIMEOUTS.cli });
-		for (const vol of volumes) await run([...eng.cli, 'volume', 'rm', vol], { timeoutMs: TIMEOUTS.cli });
-		if (await exists(run, eng, ['inspect', container])) leftovers.push(`container ${container}`);
-		for (const vol of volumes) if (await exists(run, eng, ['volume', 'inspect', vol])) leftovers.push(`volume ${vol}`);
+		left = await removeAll(run, eng, { containers: [container], volumes, stop: r.timedOut });
 	}
 	const v = setup === null ? loadsVerdict(r) : { pass: false, evidence: setup };
-	if (!v.pass && r.output) process.stderr.write(`--- LOADS server log ---\n${r.output}\n--- end LOADS server log ---\n`);
-	if (leftovers.length) return fail('LOADS', `${v.pass ? '' : `${v.evidence}; `}left behind: ${leftovers.join(', ')}`);
-	return { name: 'LOADS', ...v };
+	if (!v.pass && r.output && !s.aborted) process.stderr.write(`--- LOADS server log ---\n${r.output}\n--- end LOADS server log ---\n`);
+	const leftovers = leftText(left);
+	if (leftovers) return fail(LOADS, `${v.pass ? '' : `${v.evidence}; `}${leftovers}`);
+	return { name: LOADS, ...v };
 }
 
-async function reachable({ run, eng, id, base, tmp, protocol }) {
+async function reachable({ run, eng, id, base, tmp, protocol, s }) {
 	if (!eng.bash) return fail('REACHABLE', `not run: ${SMOKE_SCRIPT} needs bash, docker and python3, which the ${eng.name} host has none of; rerun with --engine docker`);
 	const container = `${base}_reachable`;
+	s.made.containers.add(container);
 	const r = await run([...eng.bash, eng.path(path.join(tmp, ...SMOKE_SCRIPT.split('/'))), id, container, MOTD], { timeoutMs: TIMEOUTS.server });
 	const leftovers = [];
-	if (await exists(run, eng, ['inspect', container])) {
-		await run([...eng.cli, 'stop', container], { timeoutMs: TIMEOUTS.cli });
-		await run([...eng.cli, 'rm', '-v', container], { timeoutMs: TIMEOUTS.cli });
-		leftovers.push(`${SMOKE_SCRIPT} left container ${container} behind, removed with rm -v`);
+	const after = await presence(run, eng, ['inspect', container]);
+	if (after.state === 'present') {
+		const left = await removeAll(run, eng, { containers: [container], stop: true });
+		const still = leftText(left);
+		leftovers.push(`${SMOKE_SCRIPT} left container ${container} behind, ${still ? `and rm -v did not clear it: ${still}` : 'removed with rm -v'}`);
+	} else if (after.state === 'unknown') {
+		leftovers.push(`container ${container} possibly left behind, could not check: ${after.why}`);
 	}
 	const answered = lastMatching(r.output, /^REACHABLE: /);
 	let v;
@@ -378,15 +527,62 @@ async function reachable({ run, eng, id, base, tmp, protocol }) {
 	else if (r.code !== 0) v = fail('REACHABLE', `${SMOKE_SCRIPT} exited ${r.code}: ${lastMatching(r.output, /::error::|assertion failed/)}`);
 	else if (!/REACHABLE confirmed/.test(r.output) || !answered.startsWith('REACHABLE: ') || !answered.includes(`protocol=${protocol} `)) v = fail('REACHABLE', `${SMOKE_SCRIPT} exited 0 without a pong advertising protocol ${protocol}: ${answered}`);
 	else v = { name: 'REACHABLE', pass: true, evidence: answered };
-	if (!v.pass) process.stderr.write(`--- REACHABLE output ---\n${r.output}\n--- end REACHABLE output ---\n`);
+	if (!v.pass && !s.aborted) process.stderr.write(`--- REACHABLE output ---\n${r.output}\n--- end REACHABLE output ---\n`);
 	if (leftovers.length) return fail('REACHABLE', `${v.pass ? '' : `${v.evidence}; `}${leftovers.join('; ')}`);
 	return v;
 }
 
+// On SIGINT or SIGTERM the running command is terminated, every later engine call becomes
+// a no-op, and this removes what the run made with calls of its own, then exits 130.
+function interruptible(d, eng) {
+	const ac = new AbortController();
+	const s = { aborted: null, made: { containers: new Set(), volumes: new Set() }, tmp: null, teardown: null };
+	s.run = (argv, opts = {}) => (s.aborted ? Promise.resolve({ code: null, output: `not run, ${s.aborted} received`, timedOut: false }) : d.run(argv, { ...opts, signal: ac.signal }));
+	const onSignal = (sig) => {
+		if (s.aborted) {
+			d.err(`verify: ${sig} again, still removing what this run made\n`);
+			return;
+		}
+		s.aborted = sig;
+		ac.abort();
+		d.err(`verify: ${sig}, terminating the running command and removing what this run made\n`);
+		s.teardown = (async () => {
+			const lines = [];
+			try {
+				const left = await removeAll(d.run, eng, { containers: [...s.made.containers], volumes: [...s.made.volumes], stop: true });
+				const text = leftText(left);
+				if (text) lines.push(text);
+			} catch (e) {
+				lines.push(`teardown failed: ${e.message}; possibly left behind: ${[...s.made.containers, ...s.made.volumes].join(', ') || 'nothing was created'}`);
+			}
+			if (s.tmp) {
+				try {
+					fs.rmSync(s.tmp, { recursive: true, force: true });
+				} catch (e) {
+					lines.push(`build tree ${s.tmp} not removed: ${e.message}`);
+				}
+				if (fs.existsSync(s.tmp) && !lines.some((l) => l.includes(s.tmp))) lines.push(`left behind: build tree ${s.tmp}`);
+			}
+			d.err(`verify: interrupted by ${sig}; ${lines.length ? lines.join('; ') : 'nothing left behind'}\n`);
+			d.exit(130);
+		})();
+	};
+	const handlers = SIGNALS.map((sig) => [sig, () => onSignal(sig)]);
+	for (const [sig, h] of handlers) d.signals.on(sig, h);
+	s.release = () => {
+		for (const [sig, h] of handlers) d.signals.removeListener(sig, h);
+	};
+	return s;
+}
+
+// Returns the verdicts, or null when a signal interrupted the run.
 async function verify(opts, deps = {}) {
 	const d = {
 		run: spawnRunner,
 		out: (line) => process.stdout.write(`${line}\n`),
+		err: (text) => process.stderr.write(text),
+		exit: (code) => process.exit(code),
+		signals: process,
 		platform: process.platform,
 		tmpRoot: os.tmpdir(),
 		nonce: `${process.pid}${Date.now().toString(36)}`,
@@ -407,34 +603,46 @@ async function verify(opts, deps = {}) {
 	d.out(`verify: pmmp-core ${coreSha}, the HEAD of ${core}; uncommitted changes there are not built`);
 	d.out(`verify: packages/ from pmmp-updater ${updaterSha}${dirty ? ', with uncommitted changes, which are built' : ''}`);
 
+	const s = interruptible(d, eng);
 	const tmp = fs.mkdtempSync(path.join(d.tmpRoot, 'pmmp-updater-verify-'));
+	s.tmp = tmp;
 	try {
 		let expected;
+		let prep;
 		try {
 			expected = readExpectedProtocol(path.join(d.updater, 'packages', 'bedrock-protocol', 'src'));
 			d.out(`verify: expected protocol ${expected.protocol} (${expected.version}) from packages/bedrock-protocol/src/ProtocolInfo.php`);
-			const prep = prepareTree({ core, coreSha, updater: d.updater, tmp, protocol: expected.protocol });
+			prep = prepareTree({ core, coreSha, updater: d.updater, tmp, protocol: expected.protocol });
 			d.out(`verify: build tree ${tmp}: pmmp-core ${short}, its build/php, and ${prep.copied} files of packages/ as ${PACKAGES_PREFIX} (${prep.names.join(', ')})`);
-			d.out(`verify: REACHABLE runs pmmp-core's ${SMOKE_SCRIPT} copied into the build tree, with its EXPECTED_PROTOCOL="${prep.pinned}" replaced by "${expected.protocol}" from these packages`);
+			if (prep.smoke.error) d.out(`verify: REACHABLE cannot run: ${prep.smoke.error}`);
+			else d.out(`verify: REACHABLE runs pmmp-core's ${SMOKE_SCRIPT} copied into the build tree, with its EXPECTED_PROTOCOL="${prep.smoke.pinned}" replaced by "${expected.protocol}" from these packages`);
 		} catch (e) {
 			verdicts.push(fail('BUILDS', `not built: ${e.message}`));
 		}
+		if (!verdicts.length && eng.name === 'wslc') {
+			const refused = await checkWslcImages({ run: s.run, eng, dockerfile: prep.dockerfile });
+			if (refused) verdicts.push(fail('BUILDS', `not built: --engine wslc refused: ${refused}`));
+		}
 		let id = null;
-		if (!verdicts.length) {
+		if (!verdicts.length && !s.aborted) {
 			d.out(`verify: building ${tag} with the ${eng.name} engine`);
-			const b = await builds({ run: d.run, eng, tmp, coreSha, tag, identity });
+			const b = await builds({ run: s.run, eng, tmp, coreSha, tag, identity });
 			id = b.id || null;
 			verdicts.push(b.verdict);
 		}
-		if (id) {
-			verdicts.push(await loads({ run: d.run, eng, id, base }));
-			verdicts.push(await reachable({ run: d.run, eng, id, base, tmp, protocol: expected.protocol }));
+		if (id && !s.aborted) {
+			verdicts.push(await loads({ run: s.run, eng, id, base, s }));
+			if (prep.smoke.error) verdicts.push(fail('REACHABLE', `not run: ${prep.smoke.error}`));
+			else if (!s.aborted) verdicts.push(await reachable({ run: s.run, eng, id, base, tmp, protocol: expected.protocol, s }));
 		} else {
-			verdicts.push(fail('LOADS', 'not run, BUILDS failed'), fail('REACHABLE', 'not run, BUILDS failed'));
+			verdicts.push(fail(LOADS, 'not run, BUILDS failed'), fail('REACHABLE', 'not run, BUILDS failed'));
 		}
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		if (s.teardown) await s.teardown;
+		else fs.rmSync(tmp, { recursive: true, force: true });
+		s.release();
 	}
+	if (s.aborted) return null;
 	for (const v of verdicts) d.out(`${v.name} ${v.pass ? 'PASS' : 'FAIL'} | ${v.evidence}`);
 	return verdicts;
 }
@@ -456,6 +664,7 @@ async function main(argv, deps = {}) {
 		return 2;
 	}
 	const verdicts = await verify(opts, deps);
+	if (verdicts === null) return 130;
 	return verdicts.every((v) => v.pass) ? 0 : 1;
 }
 
@@ -466,4 +675,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { UsageError, TIMEOUTS, POCKETMINE_ARGS, MOTD, parseArgs, readExpectedProtocol, parseLoadsLog, loadsVerdict, checkCoreCommit, pinProtocol, toWslPath, engine, writeCommitTree, prepareTree, verify, main };
+module.exports = { UsageError, TIMEOUTS, POCKETMINE_ARGS, MOTD, LOADS, parseArgs, readExpectedProtocol, parseLoadsLog, loadsVerdict, checkCoreCommit, pinProtocol, baseImages, parseImageTable, missingImages, toWslPath, engine, spawnRunner, writeCommitTree, prepareTree, verify, main };

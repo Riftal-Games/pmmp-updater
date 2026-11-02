@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync, spawnSync } = require('child_process');
+const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
 const fx = require('../../test-support/fixtures');
@@ -113,7 +114,13 @@ function ok(output = '') {
 
 const MISSING = { code: 1, output: 'Error: No such object', timedOut: false };
 const IMAGE_ID = 'sha256:' + 'ab'.repeat(32);
-const PONG = 'REACHABLE: 127.0.0.1:32768/udp answered with edition=MCPE motd=\'riftal-verify-probe\' protocol=2239 version=1.26.70';
+const UBUNTU_DIGEST = 'sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac';
+// The distro Docker's `images --digests` table, as it printed on 2026-11-02.
+const IMAGES = `REPOSITORY   TAG       DIGEST                                                                    IMAGE ID       CREATED       SIZE
+ubuntu       24.04     ${UBUNTU_DIGEST}   68ee22004a91   4 weeks ago   119MB
+ubuntu       <none>    sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3   008173c23f95   7 weeks ago   119MB
+`;
+const PONG ='REACHABLE: 127.0.0.1:32768/udp answered with edition=MCPE motd=\'riftal-verify-probe\' protocol=2239 version=1.26.70';
 
 // Records every engine command and answers it the way a healthy engine would, unless
 // an override for that verb says otherwise. At build time it snapshots the build tree,
@@ -142,6 +149,7 @@ function fakeEngine(overrides = {}) {
 			return ok('#12 naming to docker.io/library/local-pocketmine-mp:verify done');
 		}
 		if (verb === 'image inspect') return ok(JSON.stringify([{ Id: IMAGE_ID }]));
+		if (verb.startsWith('images')) return ok(IMAGES);
 		if (verb === 'volume create' || verb === 'volume rm') return ok(argv[argv.length - 1]);
 		if (verb.startsWith('run')) return ok(CLEAN_LOG);
 		if (verb.startsWith('rm') || verb.startsWith('stop')) return ok();
@@ -152,14 +160,16 @@ function fakeEngine(overrides = {}) {
 	return { run, calls, seen };
 }
 
-async function runVerify({ core = coreFixture(), updater = updaterFixture(), engine = 'docker', tag = null, platform = 'linux', fake = fakeEngine() } = {}) {
+async function runVerify({ core = coreFixture(), updater = updaterFixture(), engine = 'docker', tag = null, platform = 'linux', fake = fakeEngine(), signals = new EventEmitter() } = {}) {
 	const lines = [];
+	const errs = [];
+	const exits = [];
 	const tmpRoot = fx.tempDir('verify-tmp');
-	const verdicts = await verify.verify({ core, engine, tag }, { run: fake.run, out: (l) => lines.push(l), platform, tmpRoot, nonce: 'n1', updater });
-	return { verdicts, lines, calls: fake.calls, seen: fake.seen, core, tmpRoot };
+	const verdicts = await verify.verify({ core, engine, tag }, { run: fake.run, out: (l) => lines.push(l), err: (t) => errs.push(t), exit: (c) => exits.push(c), signals, platform, tmpRoot, nonce: 'n1', updater });
+	return { verdicts, lines, errs, exits, calls: fake.calls, seen: fake.seen, core, tmpRoot, signals };
 }
 
-const byName = (verdicts) => Object.fromEntries(verdicts.map((v) => [v.name, v]));
+const byName = (verdicts) => Object.fromEntries(verdicts.map((v) => [v.name.split(' ')[0], v]));
 
 test('parseArgs takes --core and defaults the engine to docker', () => {
 	assert.deepEqual(verify.parseArgs(['--core', '../pmmp-core']), { core: '../pmmp-core', engine: 'docker', tag: null, help: false });
@@ -297,7 +307,7 @@ test('verify builds the core commit with these packages, then runs LOADS and REA
 	const coreSha = sh(r.core, ['rev-parse', 'HEAD']);
 	const short = coreSha.slice(0, 9);
 	const v = byName(r.verdicts);
-	assert.deepEqual(r.verdicts.map((x) => [x.name, x.pass]), [['BUILDS', true], ['LOADS', true], ['REACHABLE', true]]);
+	assert.deepEqual(r.verdicts.map((x) => [x.name, x.pass]), [['BUILDS', true], ['LOADS (no plugins)', true], ['REACHABLE', true]]);
 	assert.match(v.BUILDS.evidence, new RegExp(`^local-pocketmine-mp:verify-${short} is ${IMAGE_ID}, built from pmmp-core ${short} with pmmp-updater packages at [0-9a-f]{9} plus uncommitted changes$`));
 	assert.match(v.LOADS.evidence, /Done \(2\.506s\)!.*exit 0 after stop$/);
 	assert.equal(v.REACHABLE.evidence, PONG);
@@ -333,7 +343,9 @@ test('verify builds the core commit with these packages, then runs LOADS and REA
 	assert.match(r.seen.tree.smoke, /^EXPECTED_PROTOCOL="2239"$/m);
 	assert.ok(r.lines.some((l) => l.includes('EXPECTED_PROTOCOL="2225" replaced by "2239"')));
 	assert.deepEqual(fs.readdirSync(r.tmpRoot), [], 'the build tree is removed');
-	assert.deepEqual(r.lines.slice(-3).map((l) => l.split(' |')[0]), ['BUILDS PASS', 'LOADS PASS', 'REACHABLE PASS']);
+	assert.deepEqual(r.lines.slice(-3).map((l) => l.split(' |')[0]), ['BUILDS PASS', 'LOADS (no plugins) PASS', 'REACHABLE PASS']);
+	assert.equal(r.signals.listenerCount('SIGINT') + r.signals.listenerCount('SIGTERM'), 0, 'the signal handlers are released');
+	assert.deepEqual(r.exits, []);
 });
 
 test('verify leaves the pmmp-core checkout untouched', async () => {
@@ -436,17 +448,43 @@ test('REACHABLE fails when the script exits 0 without the expected pong', async 
 });
 
 test('a container the smoke script leaves behind is removed and fails REACHABLE', async () => {
-	const fake = fakeEngine({ inspect: async (argv) => (argv[argv.length - 1].endsWith('_reachable') ? ok('[{}]') : MISSING) });
+	const removed = (f) => f.calls.some((c) => /^docker rm -v \S+_reachable$/.test(c.argv.join(' ')));
+	const fake = fakeEngine({ inspect: async (argv) => (argv[argv.length - 1].endsWith('_reachable') && !removed(fake) ? ok('[{}]') : MISSING) });
 	const r = await runVerify({ fake });
 	assert.match(byName(r.verdicts).REACHABLE.evidence, /left container riftal_smoke_verify_\w+_n1_reachable behind, removed with rm -v$/);
-	assert.ok(r.calls.some((c) => /^docker rm -v \S+_reachable$/.test(c.argv.join(' '))));
+	assert.ok(removed(fake));
 });
 
-test('the wslc engine builds and loads with wslc and does not claim REACHABLE', async () => {
-	const fake = fakeEngine();
-	const wrapped = { ...fake, run: (argv, opts) => fake.run(argv[0].endsWith('wslc.exe') ? ['docker', ...argv.slice(1)] : argv, opts) };
-	const r = await runVerify({ engine: 'wslc', platform: 'win32', fake: wrapped });
+test('a container that survives rm -v after the smoke script fails REACHABLE as still there', async () => {
+	const fake = fakeEngine({ inspect: async (argv) => (argv[argv.length - 1].endsWith('_reachable') ? ok('[{}]') : MISSING) });
+	const r = await runVerify({ fake });
+	assert.match(byName(r.verdicts).REACHABLE.evidence, /left container \S+_reachable behind, and rm -v did not clear it: left behind: container \S+_reachable$/);
+});
+
+test('a cleanup check that times out or errors is reported as possibly left behind, never as gone', async () => {
+	const hung = fakeEngine({ 'volume inspect': async (argv) => (argv[argv.length - 1].endsWith('_data') ? { code: null, output: '', timedOut: true } : MISSING) });
+	const a = byName((await runVerify({ fake: hung })).verdicts).LOADS;
+	assert.equal(a.pass, false);
+	assert.match(a.evidence, /^possibly left behind, could not check: volume riftal_smoke_verify_\w+_n1_loads_data \(volume inspect \S+ did not answer within 2 minutes\)$/);
+
+	const daemon = fakeEngine({ inspect: async () => ({ code: 1, output: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?', timedOut: false }) });
+	const b = byName((await runVerify({ fake: daemon })).verdicts);
+	assert.match(b.LOADS.evidence, /^possibly left behind, could not check: container \S+_loads \(inspect \S+ exited 1: Cannot connect to the Docker daemon/);
+	assert.match(b.REACHABLE.evidence, /^container \S+_reachable possibly left behind, could not check: inspect \S+ exited 1: Cannot connect/);
+
+	const gone = fakeEngine({ 'volume inspect': async (argv) => ({ code: 1, output: `Error response from daemon: get ${argv[argv.length - 1]}: no such volume`, timedOut: false }) });
+	assert.equal(byName((await runVerify({ fake: gone })).verdicts).LOADS.pass, true, 'the distro Docker\'s lower-case "no such volume" counts as gone');
+});
+
+function asWslc(fake) {
+	return { ...fake, run: (argv, opts) => fake.run(argv[0].endsWith('wslc.exe') ? ['docker', ...argv.slice(1)] : argv, opts) };
+}
+
+test('the wslc engine checks its images first, builds and loads with wslc, and does not claim REACHABLE', async () => {
+	const r = await runVerify({ engine: 'wslc', platform: 'win32', fake: asWslc(fakeEngine()) });
 	const v = byName(r.verdicts);
+	assert.deepEqual(r.calls[0].argv, ['docker', 'images', '--digests']);
+	assert.equal(r.calls[1].argv[1], 'build');
 	assert.equal(v.BUILDS.pass, true);
 	assert.equal(v.LOADS.pass, true);
 	assert.equal(v.REACHABLE.pass, false);
@@ -455,11 +493,176 @@ test('the wslc engine builds and loads with wslc and does not claim REACHABLE', 
 	for (const c of r.calls) assert.ok(c.opts.timeoutMs > 0, 'every wslc call has a timeout');
 });
 
+test('the wslc engine refuses to build when it would pull a base image', async () => {
+	const pinned = DOCKERFILE.replace(/ubuntu:24\.04/g, `ubuntu:24.04@${UBUNTU_DIGEST.replace('68ee', '0000')}`);
+	const cases = [
+		[{}, pinned, /--engine wslc refused: the build would pull what wslc does not have: ubuntu:24\.04@sha256:0000\S+: not listed$/],
+		[{ images: async () => ok(IMAGES.replace(/^ubuntu {7}24\.04 .*\n/m, '')) }, DOCKERFILE, /ubuntu:24\.04: not listed$/],
+		[{ images: async () => ok('REPOSITORY   TAG   IMAGE ID\nubuntu   24.04   68ee22004a91\n') }, pinned, /the listing has no DIGEST column to confirm it$/],
+		[{ images: async () => ({ code: null, output: '', timedOut: true }) }, DOCKERFILE, /wslc images --digests did not answer within 2 minutes$/],
+		[{ images: async () => ({ code: 1, output: 'unknown flag: --digests', timedOut: false }) }, DOCKERFILE, /wslc images --digests exited 1: unknown flag: --digests$/],
+		[{ images: async () => ok('ubuntu 24.04\n') }, DOCKERFILE, /printed no REPOSITORY and TAG header/],
+		[{}, 'ARG BASE=ubuntu:24.04\nFROM ${BASE}\nCOPY ./deps/pmmp-updater/packages /p\n', /names \$\{BASE\}, which cannot be checked without building$/],
+	];
+	for (const [overrides, dockerfile, want] of cases) {
+		const r = await runVerify({ engine: 'wslc', platform: 'win32', core: coreFixture({ dockerfile }), fake: asWslc(fakeEngine(overrides)) });
+		const v = byName(r.verdicts);
+		assert.match(v.BUILDS.evidence, want);
+		assert.equal(v.LOADS.evidence, 'not run, BUILDS failed');
+		assert.ok(!r.calls.some((c) => c.argv[1] === 'build'), 'nothing is built');
+		assert.deepEqual(fs.readdirSync(r.tmpRoot), []);
+	}
+});
+
+test('the wslc engine builds a digest-pinned base it already has', async () => {
+	const pinned = DOCKERFILE.replace(/ubuntu:24\.04/g, `ubuntu:24.04@${UBUNTU_DIGEST}`);
+	const r = await runVerify({ engine: 'wslc', platform: 'win32', core: coreFixture({ dockerfile: pinned }), fake: asWslc(fakeEngine()) });
+	assert.equal(byName(r.verdicts).BUILDS.pass, true);
+});
+
+test('baseImages lists what a build would pull and skips its own stages', () => {
+	const real = `FROM ubuntu:24.04@${UBUNTU_DIGEST} AS build-php
+COPY --chmod=700 ./build/php/compile.sh /opt/pocketmine
+FROM ubuntu:24.04@${UBUNTU_DIGEST} AS build-pocketmine
+COPY --from=build-php /opt/pocketmine/bin /opt/pocketmine/bin
+FROM ubuntu:24.04@${UBUNTU_DIGEST}
+COPY --from=build-pocketmine /opt/pocketmine/repo/PocketMine-MP.phar PocketMine-MP.phar
+`;
+	assert.deepEqual(verify.baseImages(real), { images: [`ubuntu:24.04@${UBUNTU_DIGEST}`], unresolved: [] });
+	const other = '# syntax=docker/dockerfile:1.7\nFROM --platform=linux/amd64 php:8.3-cli AS a\nFROM scratch\nCOPY --from=0 /x /x\nCOPY --from=composer:2 /usr/bin/composer /c\nRUN --mount=type=cache,from=busybox:1,target=/b true\nFROM ${IMG}\n';
+	assert.deepEqual(verify.baseImages(other), { images: ['docker/dockerfile:1.7', 'php:8.3-cli', 'composer:2', 'busybox:1'], unresolved: ['${IMG}'] });
+});
+
+test('missingImages reads the distro Docker table', () => {
+	const table = verify.parseImageTable(IMAGES);
+	assert.equal(table.digests, true);
+	assert.deepEqual(verify.missingImages(table, [`ubuntu:24.04@${UBUNTU_DIGEST}`, 'ubuntu:24.04', 'docker.io/library/ubuntu:24.04', 'ubuntu']), ['ubuntu: not listed']);
+	assert.equal(verify.parseImageTable(''), null);
+});
+
+test('a Done line does not excuse a CRITICAL line: LOADS fails', () => {
+	const log = CLEAN_LOG.replace('[18:08:46.056] [Server thread/INFO]: Done', '[18:08:46.050] [Server thread/CRITICAL]: Could not load world "world"\n[18:08:46.056] [Server thread/INFO]: Done');
+	const r = verify.parseLoadsLog(log);
+	assert.match(r.done, /Done \(2\.506s\)!/);
+	assert.deepEqual(r.problems.map((p) => p.text), ['[18:08:46.050] [Server thread/CRITICAL]: Could not load world "world"']);
+	assert.deepEqual(verify.loadsVerdict({ output: log, code: 0, timedOut: false }), { pass: false, evidence: 'log line 8: [18:08:46.050] [Server thread/CRITICAL]: Could not load world "world"' });
+});
+
+test('a smoke script with no or two EXPECTED_PROTOCOL lines fails REACHABLE, not BUILDS', async () => {
+	for (const [smoke, found] of [['#!/usr/bin/env bash\necho no pin\n', 0], [`${SMOKE}EXPECTED_PROTOCOL="1"\n`, 2]]) {
+		const r = await runVerify({ core: coreFixture({ smoke }) });
+		assert.deepEqual(r.verdicts.map((x) => [x.name, x.pass]), [['BUILDS', true], ['LOADS (no plugins)', true], ['REACHABLE', false]]);
+		assert.equal(byName(r.verdicts).REACHABLE.evidence, `not run: expected one EXPECTED_PROTOCOL="<n>" line in .github/workflows/reachable-smoke.sh, found ${found}`);
+		assert.ok(!r.calls.some((c) => c.argv[0] === 'bash'), 'the unpinned script never runs');
+		assert.ok(r.lines.some((l) => l.startsWith('verify: REACHABLE cannot run: ')));
+	}
+});
+
+// Answers the verb with a command that runs until verify aborts it, raising the signal
+// once the command is under way, the way Ctrl-C lands mid-build or mid-boot.
+function interruptedAt(verb, signals, sig = 'SIGINT') {
+	const seen = { signal: null };
+	const hold = (argv, opts) => new Promise((resolve) => {
+		seen.signal = opts.signal;
+		opts.signal.addEventListener('abort', () => resolve({ code: null, output: 'terminated', timedOut: false }), { once: true });
+		setImmediate(() => signals.emit(sig));
+	});
+	return { overrides: { [verb]: hold }, seen };
+}
+
+test('SIGINT during LOADS terminates the boot, stops and removes its container and volumes, removes the tree and exits 130', async () => {
+	const signals = new EventEmitter();
+	const at = interruptedAt('run', signals);
+	const fake = fakeEngine(at.overrides);
+	const r = await runVerify({ fake, signals });
+	assert.equal(r.verdicts, null);
+	assert.deepEqual(r.exits, [130]);
+	assert.equal(at.seen.signal.aborted, true, 'the running command was terminated');
+	const base = r.calls.find((c) => c.argv[1] === 'run').argv[3];
+	const after = r.calls.slice(r.calls.findIndex((c) => c.argv[1] === 'run') + 1).map((c) => c.argv.join(' '));
+	assert.deepEqual(after, [
+		`docker stop ${base}`,
+		`docker rm -v ${base}`,
+		`docker volume rm ${base}_data`,
+		`docker volume rm ${base}_plugins`,
+		`docker inspect ${base}`,
+		`docker volume inspect ${base}_data`,
+		`docker volume inspect ${base}_plugins`,
+	]);
+	assert.ok(!r.calls.some((c) => c.argv[0] === 'bash'), 'REACHABLE never starts');
+	assert.deepEqual(fs.readdirSync(r.tmpRoot), [], 'the build tree is removed');
+	assert.match(r.errs.join(''), /verify: interrupted by SIGINT; nothing left behind\n$/);
+	assert.ok(!r.lines.some((l) => /^(BUILDS|LOADS|REACHABLE) /.test(l)), 'no verdict is printed for an interrupted run');
+	assert.equal(signals.listenerCount('SIGINT') + signals.listenerCount('SIGTERM'), 0);
+});
+
+test('SIGTERM during the build terminates it, removes the tree and exits 130', async () => {
+	const signals = new EventEmitter();
+	const at = interruptedAt('build', signals, 'SIGTERM');
+	const r = await runVerify({ fake: fakeEngine(at.overrides), signals });
+	assert.equal(r.verdicts, null);
+	assert.deepEqual(r.exits, [130]);
+	assert.equal(at.seen.signal.aborted, true);
+	assert.deepEqual(r.calls.map((c) => c.argv[1]), ['build'], 'nothing runs after the build is terminated');
+	assert.deepEqual(fs.readdirSync(r.tmpRoot), []);
+	assert.match(r.errs.join(''), /interrupted by SIGTERM; nothing left behind/);
+});
+
+test('SIGINT during REACHABLE stops and removes the smoke container', async () => {
+	const signals = new EventEmitter();
+	const r = await runVerify({ fake: fakeEngine(interruptedAt('bash', signals).overrides), signals });
+	assert.deepEqual(r.exits, [130]);
+	const after = r.calls.slice(r.calls.findIndex((c) => c.argv[0] === 'bash') + 1).map((c) => c.argv.join(' '));
+	assert.ok(after.some((a) => /^docker stop \S+_reachable$/.test(a)));
+	assert.ok(after.some((a) => /^docker rm -v \S+_reachable$/.test(a)));
+	assert.deepEqual(fs.readdirSync(r.tmpRoot), []);
+});
+
+test('an interrupt prints what it could not remove', async () => {
+	const signals = new EventEmitter();
+	const at = interruptedAt('run', signals);
+	const fake = fakeEngine({
+		...at.overrides,
+		'volume inspect': async (argv) => (argv[argv.length - 1].endsWith('_data') ? ok('[{}]') : { code: null, output: '', timedOut: true }),
+	});
+	const r = await runVerify({ fake, signals });
+	assert.deepEqual(r.exits, [130]);
+	assert.match(r.errs.join(''), /interrupted by SIGINT; left behind: volume \S+_loads_data; possibly left behind, could not check: volume \S+_loads_plugins \(volume inspect \S+ did not answer within 2 minutes\)\n$/);
+});
+
+test('a second signal during teardown does not cut it short', async () => {
+	const signals = new EventEmitter();
+	const at = interruptedAt('run', signals);
+	const fake = fakeEngine({ ...at.overrides, stop: async () => { signals.emit('SIGINT'); return ok(); } });
+	const r = await runVerify({ fake, signals });
+	assert.deepEqual(r.exits, [130]);
+	assert.match(r.errs.join(''), /SIGINT again, still removing what this run made/);
+	assert.ok(r.calls.some((c) => /^docker volume inspect \S+_plugins$/.test(c.argv.join(' '))), 'teardown ran to the end');
+});
+
+test('main returns 130 for an interrupted run', async () => {
+	const signals = new EventEmitter();
+	const at = interruptedAt('build', signals);
+	const code = await verify.main(['--core', coreFixture()], { run: fakeEngine(at.overrides).run, out: () => {}, err: () => {}, exit: () => {}, signals, platform: 'linux', tmpRoot: fx.tempDir('verify-tmp'), nonce: 'n1', updater: updaterFixture() });
+	assert.equal(code, 130);
+});
+
+test('spawnRunner terminates its child when the signal aborts', async () => {
+	const ac = new AbortController();
+	const started = Date.now();
+	const pending = verify.spawnRunner([process.execPath, '-e', 'setTimeout(() => {}, 60000)'], { timeoutMs: 120000, signal: ac.signal });
+	setTimeout(() => ac.abort(), 200);
+	const r = await pending;
+	assert.notEqual(r.code, 0);
+	assert.equal(r.timedOut, false);
+	assert.ok(Date.now() - started < 30000, 'the child did not run to its 60 s end');
+});
+
 // Builds the real pmmp-core image, 20 to 40 minutes when the PHP stage is not cached.
 test('live: verify against the sibling pmmp-core with the distro Docker', { skip: process.env.RIFTAL_LIVE_VERIFY !== '1' && 'set RIFTAL_LIVE_VERIFY=1' }, () => {
 	const core = process.env.RIFTAL_VERIFY_CORE || path.join(__dirname, '..', '..', '..', '..', 'pmmp-core');
 	const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'verify.js'), '--core', core, '--engine', 'docker'], { encoding: 'utf8', timeout: 75 * 60 * 1000, maxBuffer: 1 << 28 });
 	const verdicts = r.stdout.split('\n').filter((l) => /^(BUILDS|LOADS|REACHABLE) /.test(l));
-	assert.deepEqual(verdicts.map((l) => l.split(' |')[0]), ['BUILDS PASS', 'LOADS PASS', 'REACHABLE PASS'], `${r.stdout}\n${r.stderr}`);
+	assert.deepEqual(verdicts.map((l) => l.split(' |')[0]), ['BUILDS PASS', 'LOADS (no plugins) PASS', 'REACHABLE PASS'], `${r.stdout}\n${r.stderr}`);
 	assert.equal(r.status, 0);
 });

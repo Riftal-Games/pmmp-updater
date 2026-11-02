@@ -52,7 +52,7 @@ Separately from the run, so the run's PR stays about the version and the lesson 
 
 If this symptom already has an incident and a merged lesson, the lesson did not hold. Do not write a second patch. Record the repeat in a new incident file that links the first, and hand it to the steward with both incident files. The steward decides whether the approach itself is wrong.
 
-The repeat incident file lands in a PR of its own that changes nothing else, so it passes the lesson guard. The steward decides the fix, and an implementer writes it in a separate PR that does not touch `docs/incidents/` or `docs/lessons.md`. The steward merges that PR, because it will usually touch a protected path, which fails the guard.
+The repeat incident file lands in a PR of its own that changes nothing else, so it passes the lesson guard. The steward decides the fix, and an implementer writes it in a separate PR that does not touch `docs/incidents/` or `docs/lessons.md`. The steward merges that PR, because it will usually touch a protected path, which is outside the approver's lane.
 
 ## Bounds
 
@@ -85,11 +85,11 @@ It fails such a PR when:
 - the PR deletes a file. A rename counts as a deletion;
 - the PR changes a `*.test.js` file or any file under a `test/` directory that already existed, so a helper or fixture cannot be weakened either.
 
-It fails every other PR that touches a protected path other than `packages/`, with a message that it needs a steward merge. Version runs change `packages/`, so that path is judged only for lessons.
+Every other PR passes the check. For each protected path such a PR touches, the guard prints a GitHub Actions notice, `<path>: steward path, this PR needs a steward merge`, then a summary line, and exits 0. It does not fail the PR, because the steward merges only on fully green CI. What routes the PR to the steward is the approver's gated-path list, which refuses it. Version runs change `packages/`, a package's own `.gitattributes` and `.gitignore` included, so nothing under `packages/` is flagged outside a lesson.
 
 These bounds have no mechanical check, and only the reviewer reading the diff enforces them:
 
-- the rest of the run fix in step 5, because run PRs are not lessons and the guard judges only their protected paths;
+- the run fix in step 5, because run PRs are not lessons and the guard never fails them;
 - not widening what a skill, agent or tool may do;
 - not weakening a fixture kept outside a `test/` directory;
 - not weakening assertions by other means, such as non-test code that patches `node:assert` or the code under test so a new test passes vacuously.

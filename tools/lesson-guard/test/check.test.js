@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { check, isLesson, isProtected, parseNameStatus } = require('../check');
+const { check, isLesson, isProtected, notice, parseNameStatus, stewardPaths } = require('../check');
 const fx = require('../../test-support/fixtures');
 
 const CHECK = path.join(__dirname, '..', 'check.js');
@@ -47,21 +47,29 @@ test('any change to an existing test file is refused, in any status but A', () =
 	assert.deepEqual(check([{ status: 'A', path: 'tools/x/test/new.test.js' }]), []);
 });
 
-test('a PR that is not a lesson is refused for protected paths other than packages/', () => {
+test('a PR that is not a lesson flags protected paths as steward paths, never anything under packages/', () => {
 	const changes = [
 		{ status: 'M', path: 'tools/lesson-guard/check.js' },
 		{ status: 'M', path: '.claude/skills/Skill-Incident/SKILL.md' },
 		{ status: 'M', path: 'packages/bedrock-protocol/src/ProtocolInfo.php' },
+		{ status: 'M', path: 'packages/bedrock-protocol/.gitignore' },
+		{ status: 'M', path: 'packages/bedrock-data/.gitattributes' },
 		{ status: 'D', path: 'packages/bedrock-data/old.json' },
 		{ status: 'M', path: 'tools/x/test/x.test.js' },
 		{ status: 'D', path: 'tools/x/test/fixture.json' },
 	];
-	assert.deepEqual(check(changes, { lesson: false }), [
-		'tools/lesson-guard/check.js: protected path, needs a steward merge',
-		'.claude/skills/Skill-Incident/SKILL.md: protected path, needs a steward merge',
-	]);
-	assert.ok(!isProtected('packages/bedrock-data/README.md', { lesson: false }));
+	assert.deepEqual(stewardPaths(changes), ['tools/lesson-guard/check.js', '.claude/skills/Skill-Incident/SKILL.md']);
+	for (const p of ['packages/bedrock-data/README.md', 'packages/bedrock-protocol/.gitignore', 'Packages/bedrock-data/.gitattributes', 'packages/x/CLAUDE.md']) {
+		assert.ok(!isProtected(p, { lesson: false }), p);
+		assert.ok(isProtected(p), p);
+	}
 	assert.ok(isProtected('.github/workflows/ci.yml', { lesson: false }));
+	assert.ok(isProtected('tools/x/.gitignore', { lesson: false }));
+});
+
+test('a steward-path notice is one workflow command, whatever the path holds', () => {
+	assert.equal(notice('tools/lesson-guard/check.js'), '::notice::tools/lesson-guard/check.js: steward path, this PR needs a steward merge');
+	assert.equal(notice('a%b\r\n::error::x/.gitignore'), '::notice::a%25b%0D%0A::error::x/.gitignore: steward path, this PR needs a steward merge');
 });
 
 test('any change to an existing file under a test/ directory is refused in a lesson', () => {
@@ -160,14 +168,20 @@ test('a new test file in a lesson passes end to end', () => {
 	assert.deepEqual(runGuard(dir), { code: 0, err: '' });
 });
 
-test('a PR that is not a lesson and rewrites the guard is refused end to end, naming the steward', () => {
-	const { dir, git } = repoWith({ 'tools/lesson-guard/check.js': 'process.exit(1);\n' });
+test('a PR that is not a lesson and rewrites the guard passes end to end with a steward notice', () => {
+	const { dir, git } = repoWith({ 'tools/lesson-guard/check.js': 'process.exit(1);\n', '.github/workflows/ci.yml': 'on: push\n' });
 	fs.writeFileSync(path.join(dir, 'tools/lesson-guard/check.js'), 'process.exit(0);\n');
+	fs.writeFileSync(path.join(dir, '.github/workflows/ci.yml'), 'on: pull_request\n');
 	git('commit', '-q', '-am', 'guard');
 	const r = guard(dir, 'updater/10-tidy');
-	assert.equal(r.code, 1);
-	assert.match(r.err, /tools\/lesson-guard\/check\.js: protected path, needs a steward merge/);
-	assert.match(r.out, /needs a steward merge/);
+	assert.equal(r.code, 0, r.err);
+	assert.equal(r.err, '');
+	assert.equal(r.out, [
+		'::notice::.github/workflows/ci.yml: steward path, this PR needs a steward merge',
+		'::notice::tools/lesson-guard/check.js: steward path, this PR needs a steward merge',
+		'Not a lesson PR. It touches 2 steward path(s), so it needs a steward merge; this check does not block it.',
+		'',
+	].join('\n'));
 });
 
 test('a version run that changes packages/ and existing tests passes end to end', () => {
@@ -178,7 +192,18 @@ test('a version run that changes packages/ and existing tests passes end to end'
 	git('commit', '-q', '-am', 'version');
 	const r = guard(dir, 'bedrock-1.26.70');
 	assert.equal(r.code, 0, r.err);
-	assert.match(r.out, /Not a lesson PR, and it touches no protected path/);
+	assert.equal(r.out, 'Not a lesson PR, and it touches no steward path.\n');
+});
+
+test('a version run that edits a package .gitignore passes end to end with no notice', () => {
+	const { dir, git } = repoWith({ 'packages/bedrock-protocol/.gitignore': '/vendor/\n' });
+	fs.writeFileSync(path.join(dir, 'packages/bedrock-protocol/.gitignore'), '/vendor/\n/.phpunit.cache/\n');
+	git('commit', '-q', '-am', 'version');
+	const r = guard(dir, 'bedrock-1.26.70');
+	assert.equal(r.code, 0, r.err);
+	assert.equal(r.err, '');
+	assert.doesNotMatch(r.out, /::notice::/);
+	assert.equal(r.out, 'Not a lesson PR, and it touches no steward path.\n');
 });
 
 test('a weakened fixture under test/ in a lesson is caught end to end', () => {

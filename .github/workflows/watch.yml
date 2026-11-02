@@ -1,0 +1,45 @@
+name: Watch
+
+# Files the update issue for a Bedrock version newer than our packages, or comments on
+# the open one, through tools/watch. It reads Mojang's docs tags and the BDS links JSON
+# and never downloads BDS. Docs tags it diffs are cached under the runner user's
+# ~/.cache, outside the workspace.
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print what would be filed or commented, without writing to GitHub
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+# One run at a time and none cancelled, so two runs never file the same version twice.
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: watch
+    runs-on: [self-hosted, linux, riftal]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Check Mojang docs tags and BDS links
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            node tools/watch/watch.js --dry-run
+          else
+            node tools/watch/watch.js
+          fi

@@ -12,7 +12,7 @@ image="$(cat "$RUNNER_TEMP/php-ci.iid")"
 cache="$HOME/.cache/pmmp-updater/composer"
 mkdir -p "$cache"
 
-exec docker run --rm -m 3g --cpus 2 \
+exec docker run --rm --init -m 3g --cpus 2 \
   --user "$(id -u):$(id -g)" \
   -e COMPOSER_HOME=/tmp/composer \
   -e COMPOSER_CACHE_DIR=/composer-cache \

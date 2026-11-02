@@ -42,7 +42,7 @@ jobs:
         run: node --test --test-name-pattern=live "tools/**/*.test.js"
 
   # The package's own checks, as its upstream CI ran them. bedrock-protocol is the only
-  # package with PHP code; the other three are data with no PHP checks to run.
+  # package with PHP checks of its own; the other three ship data.
   bedrock-protocol:
     name: bedrock-protocol PHP checks
     runs-on: [self-hosted, linux, riftal]
@@ -63,13 +63,17 @@ jobs:
         run: docker build --progress=plain --iidfile "$RUNNER_TEMP/php-ci.iid" .github/php-ci
 
       - name: Run PHP-CS-Fixer
-        run: docker run --rm -m 1g --cpus 1 -v "$(realpath "$PACKAGE"):/code:ro" -w /code "$PHP_CS_FIXER_IMAGE" fix --dry-run --diff --using-cache=no --show-progress=none
+        timeout-minutes: 10
+        run: docker run --rm --init -m 1g --cpus 1 -v "$(realpath "$PACKAGE"):/code:ro" -w /code "$PHP_CS_FIXER_IMAGE" fix --dry-run --diff --using-cache=no --show-progress=none
 
       - name: Install Composer dependencies
+        timeout-minutes: 10
         run: bash .github/php-ci/run.sh "$PACKAGE" composer install --prefer-dist --no-interaction --no-progress
 
       - name: Run PHPStan
+        timeout-minutes: 10
         run: bash .github/php-ci/run.sh "$PACKAGE" php vendor/bin/phpstan analyze --no-progress --memory-limit=2G
 
       - name: Run PHPUnit
+        timeout-minutes: 10
         run: bash .github/php-ci/run.sh "$PACKAGE" php vendor/bin/phpunit --bootstrap vendor/autoload.php --fail-on-warning tests/phpunit

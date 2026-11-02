@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
 const path = require('path');
 const docs = require('../../lib/mojang-docs');
 const pkg = require('../../lib/packages');
@@ -128,6 +129,41 @@ test('orders previews before the release of the same version', () => {
 
 test('only version tags reach the cache, so no argument can name another path', () => {
 	for (const bad of ['../..', 'v1.26.60/../../x', 'main', 'v1.26', '']) assert.throws(() => docs.checkout(bad), /not a Mojang docs version tag/);
+});
+
+function withCache(t) {
+	const cache = fx.tempDir('docs-cache');
+	const before = process.env.PMMP_UPDATER_CACHE;
+	process.env.PMMP_UPDATER_CACHE = cache;
+	t.after(() => {
+		if (before === undefined) delete process.env.PMMP_UPDATER_CACHE;
+		else process.env.PMMP_UPDATER_CACHE = before;
+	});
+	return path.join(cache, 'mojang-docs');
+}
+
+function fakeGit(failOn) {
+	return (args) => {
+		if (args[0] === 'clone') fx.writeTree(args[args.length - 1], { 'json/AlphaPacket.json': '{}' });
+		if (args.includes(failOn)) throw new Error(`git ${failOn} failed`);
+	};
+}
+
+test('a checkout that fails part way leaves no partial clone in the cache', (t) => {
+	const root = withCache(t);
+	for (const step of ['clone', 'sparse-checkout']) {
+		assert.throws(() => docs.checkout('v1.26.60', fakeGit(step)), new RegExp(`git ${step} failed`));
+		assert.deepEqual(fs.readdirSync(root), [], step);
+	}
+});
+
+test('a checkout that completes is renamed into place with its marker', (t) => {
+	const root = withCache(t);
+	const dir = docs.checkout('v1.26.60', fakeGit(null));
+	assert.equal(dir, path.join(root, 'v1.26.60'));
+	assert.deepEqual(fs.readdirSync(root), ['v1.26.60']);
+	assert.ok(fs.existsSync(path.join(dir, '.checkout-complete')));
+	assert.equal(docs.checkout('v1.26.60', () => assert.fail('a complete checkout is not cloned again')), dir);
 });
 
 test('every packet class in our packages maps to a ProtocolInfo constant', () => {

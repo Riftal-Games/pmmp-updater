@@ -33,14 +33,22 @@ function constantStem(packetName) {
 }
 
 // What the sibling pmmp-core checkout pins, which is what the server image actually
-// speaks. Null when there is no checkout next to this one.
+// speaks. Null when there is no checkout next to this one. A package composer resolves
+// from a path repository has a dist and no source, so its source is the dist type and
+// url, for example "path deps/pmmp-updater/packages/bedrock-protocol".
 function corePin(coreDir = path.join(REPO, '..', 'pmmp-core')) {
 	const lockFile = path.join(coreDir, 'composer.lock');
 	if (!fs.existsSync(lockFile)) return null;
 	const entry = JSON.parse(fs.readFileSync(lockFile, 'utf8')).packages.find((p) => p.name === 'axolotl-pm/bedrock-protocol');
 	if (!entry) return null;
 	const m = /\+bedrock-(\d+(?:\.\d+)+)$/.exec(entry.version);
-	return { package_version: entry.version, version: m ? m[1] : null, source: entry.source && entry.source.url };
+	return { package_version: entry.version, version: m ? m[1] : null, source: pinSource(entry) };
+}
+
+function pinSource(entry) {
+	if (entry.source && entry.source.url) return entry.source.url;
+	if (entry.dist && entry.dist.url) return `${entry.dist.type} ${entry.dist.url}`;
+	return null;
 }
 
 module.exports = { REPO, PROTOCOL_SRC, readProtocolInfo, packetClasses, constantStem, corePin };

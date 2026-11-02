@@ -40,3 +40,40 @@ jobs:
         env:
           RIFTAL_LIVE: "1"
         run: node --test --test-name-pattern=live "tools/**/*.test.js"
+
+  # The package's own checks, as its upstream CI ran them. bedrock-protocol is the only
+  # package with PHP checks of its own; the other three ship data.
+  bedrock-protocol:
+    name: bedrock-protocol PHP checks
+    runs-on: [self-hosted, linux, riftal]
+    timeout-minutes: 20
+    env:
+      PACKAGE: packages/bedrock-protocol
+      # The image pmmp-core's codestyle job runs. The tree is mounted read-only and the
+      # cache is off, because the image runs as root on a workspace that persists.
+      PHP_CS_FIXER_IMAGE: ghcr.io/php-cs-fixer/php-cs-fixer:3.75.0-php8.3@sha256:3da587bc3019ebbfc8c917e512471a721ebbc634bbb2fcf2646ab4b6bf282224
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      # Run later by the image ID it reports, never by a tag, so a concurrent run on the
+      # same daemon cannot swap the image under this one.
+      - name: Build the PHP image
+        run: docker build --progress=plain --iidfile "$RUNNER_TEMP/php-ci.iid" .github/php-ci
+
+      - name: Run PHP-CS-Fixer
+        timeout-minutes: 10
+        run: docker run --rm --init -m 1g --cpus 1 -v "$(realpath "$PACKAGE"):/code:ro" -w /code "$PHP_CS_FIXER_IMAGE" fix --dry-run --diff --using-cache=no --show-progress=none
+
+      - name: Install Composer dependencies
+        timeout-minutes: 10
+        run: bash .github/php-ci/run.sh "$PACKAGE" composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Run PHPStan
+        timeout-minutes: 10
+        run: bash .github/php-ci/run.sh "$PACKAGE" php vendor/bin/phpstan analyze --no-progress --memory-limit=2G
+
+      - name: Run PHPUnit
+        timeout-minutes: 10
+        run: bash .github/php-ci/run.sh "$PACKAGE" php vendor/bin/phpunit --bootstrap vendor/autoload.php --fail-on-warning tests/phpunit

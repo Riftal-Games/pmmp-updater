@@ -60,19 +60,26 @@ function tagForVersion(tags, version) {
 }
 
 // A tag is cloned into a temporary folder and renamed into place only once complete, so
-// an interrupted clone never leaves a partial tree that later runs would trust.
-function checkout(tag) {
+// an interrupted clone never leaves a partial tree that later runs would trust. A failed
+// clone removes its temporary folder before the error propagates, so failures do not pile
+// up in the cache. `run` stands in for git in tests.
+function checkout(tag, run = git) {
 	if (!parseTag(tag)) throw new Error(`not a Mojang docs version tag: ${tag}`);
 	const dir = path.join(cacheRoot(), 'mojang-docs', tag);
 	if (fs.existsSync(path.join(dir, COMPLETE_MARKER))) return dir;
 	fs.mkdirSync(path.dirname(dir), { recursive: true });
 	const partial = `${dir}.partial-${process.pid}`;
 	fs.rmSync(partial, { recursive: true, force: true });
-	git(['clone', '-q', '--depth', '1', '--branch', tag, '--filter=blob:none', '--sparse', DOCS_URL, partial]);
-	git(['-C', partial, 'sparse-checkout', 'set', 'json', 'developer_notes']);
-	fs.writeFileSync(path.join(partial, COMPLETE_MARKER), `${tag}\n`);
-	fs.rmSync(dir, { recursive: true, force: true });
-	fs.renameSync(partial, dir);
+	try {
+		run(['clone', '-q', '--depth', '1', '--branch', tag, '--filter=blob:none', '--sparse', DOCS_URL, partial]);
+		run(['-C', partial, 'sparse-checkout', 'set', 'json', 'developer_notes']);
+		fs.writeFileSync(path.join(partial, COMPLETE_MARKER), `${tag}\n`);
+		fs.rmSync(dir, { recursive: true, force: true });
+		fs.renameSync(partial, dir);
+	} catch (e) {
+		fs.rmSync(partial, { recursive: true, force: true, maxRetries: 5 });
+		throw e;
+	}
 	return dir;
 }
 

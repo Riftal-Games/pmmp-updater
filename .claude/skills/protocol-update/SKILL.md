@@ -29,7 +29,7 @@ Protocol updates are priority one (hard rule 3). Nothing in this procedure is a 
 ## Stage 2: Packets (preview, then again on release day)
 
 1. `packages/bedrock-protocol/src/ProtocolInfo.php`: `CURRENT_PROTOCOL`, `MINECRAFT_VERSION`, `MINECRAFT_VERSION_NETWORK`, and every added, removed or renumbered packet constant, from the diff.
-2. Added packets: generate the class with `tools/codegen` (#2) once it exists. Until then, write it by hand from the Mojang schema, following an existing packet such as `SetPassengerOfBlockPacket.php`: `create()`, getters, `encodePayload` and `decodePayload` via `CommonTypes`, `handle()`. Field order is `x-ordinal-index`. A `Compression` serialization option is a varint.
+2. Added packets: draft each class and its payload types with `/codegen` (`node tools/codegen/generate.js --all-new --from <ours> --to <target>`). Resolve every `TODO(codegen)` marker, compare each draft against any class the package already has, then apply it. Field order is `x-ordinal-index`. A `Compression` serialization option is a varint.
 3. Add each new packet to `PacketPool.php` and `PacketHandlerInterface.php`. Then run `php tools/generate-create-static-methods.php` in `packages/bedrock-protocol`.
 4. Changed packets: for each, read the `via` types in the Mojang schema and change encode and decode to match. Removed packets: delete the class, its pool entry and its handler method.
 5. Run `php-cs-fixer`, then `vendor/bin/phpstan analyze` and `vendor/bin/phpunit` in the package. Use a container built from pmmp-core's PHP stage, never a host PHP.

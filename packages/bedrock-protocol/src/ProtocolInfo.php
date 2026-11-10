@@ -299,4 +299,7 @@ final class ProtocolInfo{
 
 	public const PLAYER_TOGGLE_ARMOR_VISIBILITY_REQUEST_PACKET = 0x16c;
 
+	public const VIRTUAL_CONTAINER_OPEN_PACKET = 0x16e;
+	public const VIRTUAL_CONTAINER_CLOSE_PACKET = 0x16f;
+
 }

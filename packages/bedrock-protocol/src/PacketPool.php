@@ -275,6 +275,8 @@ class PacketPool{
 		$this->registerPacket(new ChatPacket());
 		$this->registerPacket(new ServerboundRequestOnlineMusicPlaybackPacket());
 		$this->registerPacket(new PlayerToggleArmorVisibilityRequestPacket());
+		$this->registerPacket(new VirtualContainerOpenPacket());
+		$this->registerPacket(new VirtualContainerClosePacket());
 	}
 
 	public function registerPacket(Packet $packet) : void{

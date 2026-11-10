@@ -91,6 +91,7 @@ final class ContainerUIIds{
 	public const DISC_PRESS_DYE = 68;
 	public const DISC_PRESS_DISC = 69;
 	public const DISC_PRESS_RESULT_PREVIEW = 70;
+	public const VIRTUAL_CONTAINER = 71;
 
 	/** @deprecated */
 	public const RESERVED_CONTAINER_A = self::DISC_PRESS_BLOCK;

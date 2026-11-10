@@ -336,6 +336,7 @@ const TOLERATED = {
 	fieldNames: {
 		SetPassengerOfBlockPacket: { passenger: 'actorUniqueId', passengerOfBlockData: 'passengerData' },
 		ClientboundStonecutterSetRecipePacket: { playerId: 'playerActorUniqueId' },
+		PassengerOfBlockData: { packUUID: 'packUuid' },
 	},
 	// Codegen writes every type into types\; ours group some by area.
 	namespaces: { AudioContentPlaybackType: 'sound', AudioContentRegistrationEntry: 'sound', CursorItemDragState: 'inventory' },
@@ -410,7 +411,7 @@ function tolerate(genShape, handShape, reported) {
 
 // The docs tag our classes for these packets follow. Two of them change in 1.26.70, so the
 // drafts come from the tag the package was brought to, not from the one that added them.
-const PACKAGE_TAG = 'v1.26.70-preview.23';
+const PACKAGE_TAG = 'v1.26.70-preview.24';
 
 test('live: codegen redrafts the 8 packets new in 1.26.60 as the hand-written classes, up to the listed differences', { skip: !process.env.RIFTAL_LIVE }, (t) => {
 	const out = fx.tempDir('codegen-live');

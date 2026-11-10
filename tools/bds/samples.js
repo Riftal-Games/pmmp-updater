@@ -3,9 +3,9 @@
 
 // Derives the block state list and the item table from Mojang/bedrock-samples and
 // compares them with packages/bedrock-data. The repository is "all rights reserved,
-// subject to the Minecraft EULA", which Nasir accepted for protocol work on 2026-11-02
-// (riftal-pm docs/decision-log.md), so a tag is cloned into the cache and never
-// committed. Any difference is a MISMATCH, and the process exits 1.
+// subject to the Minecraft EULA"; the steward's ruling item 1 on #3 (issuecomment
+// 6761625992) admits it under that EULA for protocol work, so a tag is cloned into the
+// cache and never committed. Any difference is a MISMATCH, and the process exits 1.
 //
 // Usage: node tools/bds/samples.js [--tag <tag>] [--samples-dir <dir>] [--data-dir <dir>] [--json]
 
@@ -140,11 +140,12 @@ function valueSets(states) {
 	return m;
 }
 
-// Block name to its states, in list order, keeping only states the other list has.
-function sequences(keys, other) {
-	const m = new Map();
-	for (const k of keys.filter((x) => other.has(x))) entry(m, k.slice(0, k.indexOf('[')), () => []).push(k);
-	return m;
+// A state's position in canonical_block_states.nbt is its network ID, so the states both
+// lists share must stand in the same order, element by element, across blocks and within.
+function orderDiffers(a, b) {
+	let i = 0;
+	while ((i < a.length || i < b.length) && a[i] === b[i]) i++;
+	return i === a.length && i === b.length ? [] : [`from shared state ${i}: samples ${a[i] ?? 'end of list'}, ours ${b[i] ?? 'end of list'}`];
 }
 
 function compareStates(derived, ours) {
@@ -158,9 +159,6 @@ function compareStates(derived, ours) {
 			if (minus(a, b).length || minus(b, a).length) values.push(`${name} ${k}: samples only [${minus(a, b)}], ours only [${minus(b, a)}]`);
 		}
 	}
-	const [ss, so] = [sequences(dk, os), sequences(ok, ds)];
-	const [sn, on] = [[...ss.keys()], [...so.keys()]];
-	const first = sn.findIndex((n, i) => n !== on[i]);
 	return {
 		samples: { names: dv.size, states: dk.length },
 		ours: { names: ov.size, states: ok.length },
@@ -169,8 +167,7 @@ function compareStates(derived, ours) {
 		values_differ: values,
 		states_only_samples: minus(dk, os),
 		states_only_ours: minus(ok, ds),
-		block_order_differs: first < 0 ? [] : [`from shared block ${first}: samples ${sn[first]}, ours ${on[first]}`],
-		state_order_differs: [...ss].filter(([n, seq]) => JSON.stringify(seq) !== JSON.stringify(so.get(n))).map(([n]) => n),
+		order_differs: orderDiffers(dk.filter((k) => os.has(k)), ok.filter((k) => ds.has(k))),
 		fields_not_in_samples: [...new Set(ours.flatMap((s) => s.fields))],
 	};
 }

@@ -105,16 +105,19 @@ test('every mutation of bedrock-data is a MISMATCH that names the difference', (
 	const states = samples.deriveStates(BLOCKS);
 	const wire = states.filter((s) => s.name === 'fixture:wire');
 	const swapped = states.map((s) => (s === wire[0] ? wire[1] : s === wire[1] ? wire[0] : s));
+	const lamp = states.filter((s) => s.name === 'fixture:lamp');
 	const cases = [
+		[{ states: [...states.filter((s) => s !== lamp[3]), lamp[3]] }, (r) => assert.deepEqual(r.blocks.order_differs, [`from shared state 4: samples ${samples.stateKey(lamp[3])}, ours ${samples.stateKey(wire[0])}`])],
 		[{ required: { ...REQUIRED, 'fixture:lamp': { runtime_id: 12 } } }, (r) => assert.deepEqual(r.items.id_differs, ['fixture:lamp: samples 10, ours 12'])],
 		[{ required: { ...REQUIRED, 'fixture:extra': { runtime_id: 13 } } }, (r) => assert.deepEqual(r.items.only_ours_other, ['fixture:extra'])],
 		[{ required: { 'fixture:lamp': { runtime_id: 10 } } }, (r) => assert.deepEqual(r.items.only_samples, ['fixture:dust'])],
 		[{ required: { ...REQUIRED, 'fixture:dust': { runtime_id: -11, version: 2 } } }, (r) => assert.deepEqual(r.items.fields_not_in_samples, ['version'])],
 		[{ states: states.filter((s) => samples.stateKey(s) !== 'fixture:wire[power=i:2]') }, (r) => assert.deepEqual([r.blocks.values_differ, r.blocks.states_only_samples], [['fixture:wire power: samples only [i:2], ours only []'], ['fixture:wire[power=i:2]']])],
 		[{ states: [...states, { name: 'fixture:extra', states: [] }] }, (r) => assert.deepEqual(r.blocks.names_only_ours, ['fixture:extra'])],
-		[{ states: swapped }, (r) => assert.deepEqual(r.blocks.state_order_differs, ['fixture:wire'])],
-		[{ states: [...states].reverse() }, (r) => assert.match(r.blocks.block_order_differs[0], /^from shared block 0: /)],
-		[{ states: [...states, states[0]] }, (r) => assert.deepEqual(r.blocks.state_order_differs, [states[0].name])],
+		[{ states: [...states, { name: 'fixture:lamp', states: [['lit', 'b', 0]] }] }, (r) => assert.deepEqual([r.blocks.states_only_ours, r.blocks.values_differ], [['fixture:lamp[lit=b:0]'], []])],
+		[{ states: swapped }, (r) => assert.deepEqual(r.blocks.order_differs, [`from shared state 5: samples ${samples.stateKey(wire[0])}, ours ${samples.stateKey(wire[1])}`])],
+		[{ states: [...states].reverse() }, (r) => assert.match(r.blocks.order_differs[0], /^from shared state 0: samples fixture:slab\[\], ours fixture:wire/)],
+		[{ states: [...states, states[0]] }, (r) => assert.deepEqual(r.blocks.order_differs, [`from shared state 8: samples end of list, ours ${samples.stateKey(states[0])}`])],
 		[{ extra: tag(3, 'version', uvar(8)) }, (r) => assert.deepEqual(r.blocks.fields_not_in_samples, ['version'])],
 	];
 	for (const [mutation, check] of cases) {

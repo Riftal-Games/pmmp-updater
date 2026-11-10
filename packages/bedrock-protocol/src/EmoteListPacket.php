@@ -24,6 +24,8 @@ use function count;
 class EmoteListPacket extends DataPacket implements ClientboundPacket, ServerboundPacket{
 	public const NETWORK_ID = ProtocolInfo::EMOTE_LIST_PACKET;
 
+	private const MAX_EMOTE_IDS = 6;
+
 	private int $playerActorRuntimeId;
 	/** @var UuidInterface[] */
 	private array $emoteIds;
@@ -47,7 +49,11 @@ class EmoteListPacket extends DataPacket implements ClientboundPacket, Serverbou
 	protected function decodePayload(ByteBufferReader $in) : void{
 		$this->playerActorRuntimeId = CommonTypes::getActorRuntimeId($in);
 		$this->emoteIds = [];
-		for($i = 0, $len = VarInt::readUnsignedInt($in); $i < $len; ++$i){
+		$len = VarInt::readUnsignedInt($in);
+		if($len > self::MAX_EMOTE_IDS){
+			throw new PacketDecodeException("Expected at most " . self::MAX_EMOTE_IDS . " emote IDs, got " . $len);
+		}
+		for($i = 0; $i < $len; ++$i){
 			$this->emoteIds[] = CommonTypes::getUUID($in);
 		}
 	}

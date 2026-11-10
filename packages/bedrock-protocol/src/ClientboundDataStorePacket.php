@@ -27,6 +27,8 @@ use function count;
 class ClientboundDataStorePacket extends DataPacket implements ClientboundPacket{
 	public const NETWORK_ID = ProtocolInfo::CLIENTBOUND_DATA_STORE_PACKET;
 
+	private const MAX_UPDATES = 500;
+
 	/**
 	 * @var DataStoreOperation[]
 	 * @phpstan-var list<DataStoreOperation>
@@ -46,7 +48,11 @@ class ClientboundDataStorePacket extends DataPacket implements ClientboundPacket
 
 	protected function decodePayload(ByteBufferReader $in) : void{
 		$this->values = [];
-		for($i = 0, $len = VarInt::readUnsignedInt($in); $i < $len; ++$i){
+		$len = VarInt::readUnsignedInt($in);
+		if($len > self::MAX_UPDATES){
+			throw new PacketDecodeException("Expected at most " . self::MAX_UPDATES . " updates, got " . $len);
+		}
+		for($i = 0; $i < $len; ++$i){
 			$this->values[] = match(VarInt::readUnsignedInt($in)){
 				DataStoreOperationType::UPDATE => DataStoreUpdate::read($in),
 				DataStoreOperationType::CHANGE => DataStoreChange::read($in),

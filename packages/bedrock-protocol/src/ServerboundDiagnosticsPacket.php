@@ -17,6 +17,7 @@ namespace pocketmine\network\mcpe\protocol;
 use pmmp\encoding\ByteBufferReader;
 use pmmp\encoding\ByteBufferWriter;
 use pmmp\encoding\LE;
+use pmmp\encoding\VarInt;
 use pocketmine\network\mcpe\protocol\serializer\CommonTypes;
 use pocketmine\network\mcpe\protocol\types\EntityDiagnosticTimingInfo;
 use pocketmine\network\mcpe\protocol\types\MemoryCategoryCounter;
@@ -26,6 +27,9 @@ use pocketmine\network\mcpe\protocol\types\WhiskerScopeDataSummary;
 
 class ServerboundDiagnosticsPacket extends DataPacket implements ServerboundPacket{
 	public const NETWORK_ID = ProtocolInfo::SERVERBOUND_DIAGNOSTICS_PACKET;
+
+	private const MAX_MEMORY_CATEGORY_VALUES = 111;
+	private const MAX_WHISKER_SCOPES = 33;
 
 	private float $avgFps;
 	private float $avgServerSimTickTimeMS;
@@ -168,11 +172,28 @@ class ServerboundDiagnosticsPacket extends DataPacket implements ServerboundPack
 		$this->avgRemainderTimePercent = LE::readFloat($in);
 		$this->avgUnaccountedTimePercent = LE::readFloat($in);
 
-		$this->memoryCategoryValues = CommonTypes::readList($in, MemoryCategoryCounter::read(...));
+		$this->memoryCategoryValues = self::readListOfAtMost($in, self::MAX_MEMORY_CATEGORY_VALUES, "memory category values", MemoryCategoryCounter::read(...));
 		$this->entityDiagnostics = CommonTypes::readList($in, EntityDiagnosticTimingInfo::read(...));
 		$this->systemDiagnostics = CommonTypes::readList($in, SystemDiagnosticTimingInfo::read(...));
 		$this->systemCategories = CommonTypes::readOptional($in, static fn(ByteBufferReader $in) => CommonTypes::readList($in, SystemCategory::read(...)));
-		$this->whiskerScopes = CommonTypes::readList($in, WhiskerScopeDataSummary::read(...));
+		$this->whiskerScopes = self::readListOfAtMost($in, self::MAX_WHISKER_SCOPES, "whisker scopes", WhiskerScopeDataSummary::read(...));
+	}
+
+	/**
+	 * @phpstan-template T
+	 * @phpstan-param \Closure(ByteBufferReader) : T $reader
+	 * @phpstan-return list<T>
+	 */
+	private static function readListOfAtMost(ByteBufferReader $in, int $max, string $what, \Closure $reader) : array{
+		$count = VarInt::readUnsignedInt($in);
+		if($count > $max){
+			throw new PacketDecodeException("Expected at most $max $what, got $count");
+		}
+		$result = [];
+		for($i = 0; $i < $count; ++$i){
+			$result[] = $reader($in);
+		}
+		return $result;
 	}
 
 	protected function encodePayload(ByteBufferWriter $out) : void{

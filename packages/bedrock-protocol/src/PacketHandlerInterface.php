@@ -495,4 +495,8 @@ interface PacketHandlerInterface{
 	public function handleClientboundPlayAudioContent(ClientboundPlayAudioContentPacket $packet) : bool;
 
 	public function handleServerboundRegisterAudioContent(ServerboundRegisterAudioContentPacket $packet) : bool;
+
+	public function handleChat(ChatPacket $packet) : bool;
+
+	public function handlePlayerToggleArmorVisibilityRequest(PlayerToggleArmorVisibilityRequestPacket $packet) : bool;
 }

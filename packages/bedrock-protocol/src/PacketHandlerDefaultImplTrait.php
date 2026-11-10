@@ -977,4 +977,12 @@ trait PacketHandlerDefaultImplTrait{
 	public function handleServerboundRegisterAudioContent(ServerboundRegisterAudioContentPacket $packet) : bool{
 		return false;
 	}
+
+	public function handleChat(ChatPacket $packet) : bool{
+		return false;
+	}
+
+	public function handlePlayerToggleArmorVisibilityRequest(PlayerToggleArmorVisibilityRequestPacket $packet) : bool{
+		return false;
+	}
 }

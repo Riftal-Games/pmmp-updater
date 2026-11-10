@@ -23,6 +23,8 @@ use function count;
 class ContainerRegistryCleanupPacket extends DataPacket implements ClientboundPacket{
 	public const NETWORK_ID = ProtocolInfo::CONTAINER_REGISTRY_CLEANUP_PACKET;
 
+	private const MAX_REMOVED_CONTAINERS = 1000;
+
 	/** @var FullContainerName[] */
 	private array $removedContainers;
 
@@ -43,7 +45,11 @@ class ContainerRegistryCleanupPacket extends DataPacket implements ClientboundPa
 
 	protected function decodePayload(ByteBufferReader $in) : void{
 		$this->removedContainers = [];
-		for($i = 0, $len = VarInt::readUnsignedInt($in); $i < $len; ++$i){
+		$len = VarInt::readUnsignedInt($in);
+		if($len > self::MAX_REMOVED_CONTAINERS){
+			throw new PacketDecodeException("Expected at most " . self::MAX_REMOVED_CONTAINERS . " removed containers, got " . $len);
+		}
+		for($i = 0; $i < $len; ++$i){
 			$this->removedContainers[] = FullContainerName::read($in);
 		}
 	}

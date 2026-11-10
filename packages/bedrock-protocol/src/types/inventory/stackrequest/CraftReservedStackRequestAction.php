@@ -21,30 +21,35 @@ use pocketmine\network\mcpe\protocol\serializer\CommonTypes;
 use pocketmine\network\mcpe\protocol\types\GetTypeIdFromConstTrait;
 
 /**
- * Spec name: ItemStackRequestReservedAction
+ * Spec name: ItemStackRequestCraftDiscPressAction
+ *
+ * Carries no slots: the inputs sit in the ContainerUIIds::DISC_PRESS_* containers.
  */
 final class CraftReservedStackRequestAction extends ItemStackRequestAction{
 	use GetTypeIdFromConstTrait;
 
-	public const ID = ItemStackRequestActionType::CRAFTING_RESERVED;
+	public const ID = ItemStackRequestActionType::CRAFTING_DISC_PRESS;
 
 	public function __construct(
-		private string $reservedId,
+		private string $trackSoundEventId,
 		private int $numCrafts
 	){}
 
-	public function getReservedId() : string{ return $this->reservedId; }
+	public function getTrackSoundEventId() : string{ return $this->trackSoundEventId; }
+
+	/** @deprecated */
+	public function getReservedId() : string{ return $this->trackSoundEventId; }
 
 	public function getNumCrafts() : int{ return $this->numCrafts; }
 
 	public static function read(ByteBufferReader $in) : self{
-		$reservedId = CommonTypes::getString($in);
+		$trackSoundEventId = CommonTypes::getString($in);
 		$numCrafts = Byte::readUnsigned($in);
-		return new self($reservedId, $numCrafts);
+		return new self($trackSoundEventId, $numCrafts);
 	}
 
 	public function write(ByteBufferWriter $out) : void{
-		CommonTypes::putString($out, $this->reservedId);
+		CommonTypes::putString($out, $this->trackSoundEventId);
 		Byte::writeUnsigned($out, $this->numCrafts);
 	}
 }

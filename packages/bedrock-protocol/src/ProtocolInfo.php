@@ -199,8 +199,7 @@ final class ProtocolInfo{
 
 	public const CLIENTBOUND_DEBUG_RENDERER_PACKET = 0xa4;
 	public const SYNC_ACTOR_PROPERTY_PACKET = 0xa5;
-	public const ADD_VOLUME_ENTITY_PACKET = 0xa6;
-	public const REMOVE_VOLUME_ENTITY_PACKET = 0xa7;
+
 	public const SIMULATION_TYPE_PACKET = 0xa8;
 	public const NPC_DIALOGUE_PACKET = 0xa9;
 	public const EDU_URI_RESOURCE_PACKET = 0xaa;

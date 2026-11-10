@@ -37,58 +37,49 @@ final class DataStoreUpdate implements DataStoreOperation{
 	public const ID = DataStoreOperationType::UPDATE;
 
 	public function __construct(
-		private string $name,
-		private string $property,
-		private string $path,
+		private string $variableName,
 		private DataStoreUpdateValue $data,
 		private int $updateCount,
-		private int $pathUpdateCount,
 	){}
 
-	public function getName() : string{ return $this->name; }
-
-	public function getProperty() : string{ return $this->property; }
-
-	public function getPath() : string{ return $this->path; }
+	public function getVariableName() : string{ return $this->variableName; }
 
 	public function getData() : DataStoreUpdateValue{ return $this->data; }
 
 	public function getUpdateCount() : int{ return $this->updateCount; }
 
-	public function getPathUpdateCount() : int{ return $this->pathUpdateCount; }
-
-	public static function read(ByteBufferReader $in) : self{
-		$name = CommonTypes::getString($in);
-		$property = CommonTypes::getString($in);
-		$path = CommonTypes::getString($in);
-
-		$data = match(VarInt::readUnsignedInt($in)){
+	/**
+	 * The variable value union, shared with {@see DataStoreChange}.
+	 */
+	public static function readValue(ByteBufferReader $in) : DataStoreUpdateValue{
+		return match(VarInt::readUnsignedInt($in)){
 			DataStoreUpdateValueType::DOUBLE => DoubleDataStoreUpdateValue::read($in),
 			DataStoreUpdateValueType::BOOL => BoolDataStoreUpdateValue::read($in),
 			DataStoreUpdateValueType::STRING => StringDataStoreUpdateValue::read($in),
 			default => throw new PacketDecodeException("Unknown DataStoreValueType"),
 		};
+	}
 
+	public static function writeValue(ByteBufferWriter $out, DataStoreUpdateValue $value) : void{
+		VarInt::writeUnsignedInt($out, $value->getTypeId());
+		$value->write($out);
+	}
+
+	public static function read(ByteBufferReader $in) : self{
+		$variableName = CommonTypes::getString($in);
+		$data = self::readValue($in);
 		$updateCount = LE::readUnsignedInt($in);
-		$pathUpdateCount = LE::readUnsignedInt($in);
 
 		return new self(
-			$name,
-			$property,
-			$path,
+			$variableName,
 			$data,
 			$updateCount,
-			$pathUpdateCount,
 		);
 	}
 
 	public function write(ByteBufferWriter $out) : void{
-		CommonTypes::putString($out, $this->name);
-		CommonTypes::putString($out, $this->property);
-		CommonTypes::putString($out, $this->path);
-		VarInt::writeUnsignedInt($out, $this->data->getTypeId());
-		$this->data->write($out);
+		CommonTypes::putString($out, $this->variableName);
+		self::writeValue($out, $this->data);
 		LE::writeUnsignedInt($out, $this->updateCount);
-		LE::writeUnsignedInt($out, $this->pathUpdateCount);
 	}
 }

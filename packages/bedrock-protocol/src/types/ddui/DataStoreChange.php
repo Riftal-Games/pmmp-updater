@@ -18,8 +18,7 @@ use pmmp\encoding\ByteBufferReader;
 use pmmp\encoding\ByteBufferWriter;
 use pmmp\encoding\LE;
 use pocketmine\network\mcpe\protocol\serializer\CommonTypes;
-use pocketmine\network\mcpe\protocol\types\cereal\DynamicValue;
-use pocketmine\network\mcpe\protocol\types\cereal\DynamicValueType;
+use pocketmine\network\mcpe\protocol\types\ddui\update\DataStoreUpdateValue;
 use pocketmine\network\mcpe\protocol\types\GetTypeIdFromConstTrait;
 
 /**
@@ -31,44 +30,32 @@ final class DataStoreChange implements DataStoreOperation{
 	public const ID = DataStoreOperationType::CHANGE;
 
 	public function __construct(
-		private string $name,
-		private string $property,
+		private string $variableName,
 		private int $updateCount,
-		private ?DynamicValue $data
+		private DataStoreUpdateValue $value
 	){}
 
-	public function getName() : string{ return $this->name; }
-
-	public function getProperty() : string{ return $this->property; }
+	public function getVariableName() : string{ return $this->variableName; }
 
 	public function getUpdateCount() : int{ return $this->updateCount; }
 
-	public function getData() : ?DynamicValue{ return $this->data; }
+	public function getValue() : DataStoreUpdateValue{ return $this->value; }
 
 	public static function read(ByteBufferReader $in) : self{
-		$name = CommonTypes::getString($in);
-		$property = CommonTypes::getString($in);
+		$variableName = CommonTypes::getString($in);
 		$updateCount = LE::readUnsignedInt($in);
-
-		$type = LE::readUnsignedInt($in);
-		$data = DynamicValue::read($in, $type);
+		$value = DataStoreUpdate::readValue($in);
 
 		return new self(
-			$name,
-			$property,
+			$variableName,
 			$updateCount,
-			$data,
+			$value,
 		);
 	}
 
 	public function write(ByteBufferWriter $out) : void{
-		CommonTypes::putString($out, $this->name);
-		CommonTypes::putString($out, $this->property);
+		CommonTypes::putString($out, $this->variableName);
 		LE::writeUnsignedInt($out, $this->updateCount);
-
-		//TODO: yucky, we really need to revamp how unions are handled :(
-		$type = $this->data?->getTypeId() ?? DynamicValueType::NULL;
-		LE::writeUnsignedInt($out, $type);
-		$this->data?->write($out);
+		DataStoreUpdate::writeValue($out, $this->value);
 	}
 }

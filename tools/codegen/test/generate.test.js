@@ -408,9 +408,15 @@ function tolerate(genShape, handShape, reported) {
 	return { g, h };
 }
 
+// The docs tag our classes for these packets follow. Two of them change in 1.26.70, so the
+// drafts come from the tag the package was brought to, not from the one that added them.
+const PACKAGE_TAG = 'v1.26.70-preview.23';
+
 test('live: codegen redrafts the 8 packets new in 1.26.60 as the hand-written classes, up to the listed differences', { skip: !process.env.RIFTAL_LIVE }, (t) => {
 	const out = fx.tempDir('codegen-live');
-	const r = run({ ...parseArgs(['--all-new', '--from', 'v1.26.50', '--to', 'v1.26.60', '--out', out]) });
+	const added = docs.diffDocs(docs.loadDocs(docs.checkout('v1.26.50')), docs.loadDocs(docs.checkout('v1.26.60'))).packets.added.map((p) => p.name);
+	assert.equal(added.length, 8);
+	const r = run({ ...parseArgs([...added.flatMap((n) => ['--packet', n]), '--tag', PACKAGE_TAG, '--out', out]) });
 	assert.deepEqual(r.todos, []);
 	assert.deepEqual([...r.files.keys()].sort(), [...EXPECTED_FILES].sort());
 	const reported = [];

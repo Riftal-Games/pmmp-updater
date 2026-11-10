@@ -21,4 +21,5 @@ final class AttributeValueType{
 	public const BOOL = 0;
 	public const FLOAT = 1;
 	public const COLOR = 2;
+	public const STRING = 3;
 }

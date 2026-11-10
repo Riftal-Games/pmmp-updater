@@ -23,6 +23,8 @@ use function count;
 class PlayerFogPacket extends DataPacket implements ClientboundPacket{
 	public const NETWORK_ID = ProtocolInfo::PLAYER_FOG_PACKET;
 
+	private const MAX_FOG_LAYERS = 16;
+
 	/**
 	 * @var string[]
 	 * @phpstan-var list<string>
@@ -48,7 +50,11 @@ class PlayerFogPacket extends DataPacket implements ClientboundPacket{
 
 	protected function decodePayload(ByteBufferReader $in) : void{
 		$this->fogLayers = [];
-		for($i = 0, $len = VarInt::readUnsignedInt($in); $i < $len; ++$i){
+		$len = VarInt::readUnsignedInt($in);
+		if($len > self::MAX_FOG_LAYERS){
+			throw new PacketDecodeException("Expected at most " . self::MAX_FOG_LAYERS . " fog layers, got " . $len);
+		}
+		for($i = 0; $i < $len; ++$i){
 			$this->fogLayers[] = CommonTypes::getString($in);
 		}
 	}

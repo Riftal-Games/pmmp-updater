@@ -22,10 +22,13 @@ use pocketmine\network\mcpe\protocol\types\sound\AudioContentPlaybackType;
 final class PlaySoundPacketTest extends TestCase{
 
 	private const PAYLOAD_HEAD = "\x01s\x00\x00\x00\x00\x00\x80\x3f\x00\x00\x80\x3f\x00\x00\x00";
-	private const BYTES = "\x56" . self::PAYLOAD_HEAD . "\x01\x00\x00\x80\x3e\x01\x00\x00\x00\x3f";
+	private const BYTES = "\x56" . self::PAYLOAD_HEAD . "\x01\x00\x00\x80\x3e\x01\x00\x00\x00\x3f\x00";
 
-	private static function packet(?float $playbackPositionSeconds, ?float $startDelaySeconds) : PlaySoundPacket{
-		return PlaySoundPacket::create("s", 0, 0, 0, 1, 1, 0, false, null, $playbackPositionSeconds, $startDelaySeconds);
+	private const ACTOR_RUNTIME_ID = 1 << 40;
+	private const ATTACH_BYTES = "\x01\x80\x80\x80\x80\x80\x20";
+
+	private static function packet(?float $playbackPositionSeconds, ?float $startDelaySeconds, ?int $attachToActorRuntimeId = null) : PlaySoundPacket{
+		return PlaySoundPacket::create("s", 0, 0, 0, 1, 1, 0, false, null, $playbackPositionSeconds, $startDelaySeconds, $attachToActorRuntimeId);
 	}
 
 	private static function encode(DataPacket $packet) : string{
@@ -39,11 +42,11 @@ final class PlaySoundPacketTest extends TestCase{
 	}
 
 	public function testZeroStartDelayIsPresent() : void{
-		self::assertSame("\x56" . self::PAYLOAD_HEAD . "\x00\x01\x00\x00\x00\x00", self::encode(self::packet(null, 0.0)));
+		self::assertSame("\x56" . self::PAYLOAD_HEAD . "\x00\x01\x00\x00\x00\x00\x00", self::encode(self::packet(null, 0.0)));
 	}
 
 	public function testStartDelayAbsent() : void{
-		self::assertSame("\x56" . self::PAYLOAD_HEAD . "\x00\x00", self::encode(self::packet(null, null)));
+		self::assertSame("\x56" . self::PAYLOAD_HEAD . "\x00\x00\x00", self::encode(self::packet(null, null)));
 	}
 
 	public function testDecode() : void{
@@ -53,8 +56,20 @@ final class PlaySoundPacketTest extends TestCase{
 		self::assertSame(0.5, $decoded->startDelaySeconds);
 	}
 
+	public function testAttachOptionsFollowStartDelayAsAnUnsignedVarLong() : void{
+		$bytes = "\x56" . self::PAYLOAD_HEAD . "\x00\x00" . self::ATTACH_BYTES;
+		self::assertSame($bytes, self::encode(self::packet(null, null, self::ACTOR_RUNTIME_ID)));
+
+		$decoded = new PlaySoundPacket();
+		$decoded->decode(new ByteBufferReader($bytes));
+		self::assertSame(self::ACTOR_RUNTIME_ID, $decoded->attachToActorRuntimeId);
+
+		$decoded->decode(new ByteBufferReader(self::BYTES));
+		self::assertNull($decoded->attachToActorRuntimeId);
+	}
+
 	public function testAudioContentConcurrentMusicByte() : void{
-		$bytes = "\xe7\x02\x01m\x01c\x02" . self::PAYLOAD_HEAD . "\x00\x01\x00\x00\x00\x3f";
+		$bytes = "\xe7\x02\x01m\x01c\x02" . self::PAYLOAD_HEAD . "\x00\x01\x00\x00\x00\x3f\x00";
 		$packet = ClientboundPlayAudioContentPacket::create("m", "c", AudioContentPlaybackType::CONCURRENT_MUSIC, self::packet(null, 0.5));
 		self::assertSame($bytes, self::encode($packet));
 
@@ -62,5 +77,15 @@ final class PlaySoundPacketTest extends TestCase{
 		$decoded->decode(new ByteBufferReader($bytes));
 		self::assertSame(AudioContentPlaybackType::CONCURRENT_MUSIC, $decoded->getPlaybackType());
 		self::assertSame(0.5, $decoded->getPlaySound()->startDelaySeconds);
+	}
+
+	public function testAudioContentCarriesAttachOptions() : void{
+		$bytes = "\xe7\x02\x01m\x01c\x00" . self::PAYLOAD_HEAD . "\x00\x00" . self::ATTACH_BYTES;
+		$packet = ClientboundPlayAudioContentPacket::create("m", "c", AudioContentPlaybackType::MUSIC, self::packet(null, null, self::ACTOR_RUNTIME_ID));
+		self::assertSame($bytes, self::encode($packet));
+
+		$decoded = new ClientboundPlayAudioContentPacket();
+		$decoded->decode(new ByteBufferReader($bytes));
+		self::assertSame(self::ACTOR_RUNTIME_ID, $decoded->getPlaySound()->attachToActorRuntimeId);
 	}
 }

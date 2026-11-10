@@ -39,6 +39,11 @@ class PlaySoundPacket extends DataPacket implements ClientboundPacket{
 	 * many seconds even if the sound is still loading, and the sound seeks to the elapsed position when it is ready.
 	 */
 	public ?float $startDelaySeconds = null;
+	/**
+	 * Attach Options, whose one field is an actor runtime ID. The sound then follows that actor's position on the
+	 * client; null leaves it at the position above.
+	 */
+	public ?int $attachToActorRuntimeId = null;
 
 	/**
 	 * @generate-create-func
@@ -55,6 +60,7 @@ class PlaySoundPacket extends DataPacket implements ClientboundPacket{
 		?int $serverSoundHandle,
 		?float $playbackPositionSeconds,
 		?float $startDelaySeconds,
+		?int $attachToActorRuntimeId,
 	) : self{
 		$result = new self;
 		$result->soundName = $soundName;
@@ -68,6 +74,7 @@ class PlaySoundPacket extends DataPacket implements ClientboundPacket{
 		$result->serverSoundHandle = $serverSoundHandle;
 		$result->playbackPositionSeconds = $playbackPositionSeconds;
 		$result->startDelaySeconds = $startDelaySeconds;
+		$result->attachToActorRuntimeId = $attachToActorRuntimeId;
 		return $result;
 	}
 
@@ -84,6 +91,7 @@ class PlaySoundPacket extends DataPacket implements ClientboundPacket{
 		$this->serverSoundHandle = CommonTypes::readOptional($in, LE::readUnsignedLong(...));
 		$this->playbackPositionSeconds = CommonTypes::readOptional($in, LE::readFloat(...));
 		$this->startDelaySeconds = CommonTypes::readOptional($in, LE::readFloat(...));
+		$this->attachToActorRuntimeId = CommonTypes::readOptional($in, CommonTypes::getActorRuntimeId(...));
 	}
 
 	protected function encodePayload(ByteBufferWriter $out) : void{
@@ -96,6 +104,7 @@ class PlaySoundPacket extends DataPacket implements ClientboundPacket{
 		CommonTypes::writeOptional($out, $this->serverSoundHandle, LE::writeUnsignedLong(...));
 		CommonTypes::writeOptional($out, $this->playbackPositionSeconds, LE::writeFloat(...));
 		CommonTypes::writeOptional($out, $this->startDelaySeconds, LE::writeFloat(...));
+		CommonTypes::writeOptional($out, $this->attachToActorRuntimeId, CommonTypes::putActorRuntimeId(...));
 	}
 
 	public function handle(PacketHandlerInterface $handler) : bool{

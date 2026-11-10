@@ -22,7 +22,8 @@ use pocketmine\network\mcpe\protocol\types\SignedChat;
 
 /**
  * The Signed Chat block carries a Chat Service signature that receiving clients verify, so a server relays it
- * byte for byte and decorates only through Formatting.
+ * byte for byte. Room Id and Formatting are outside the signature, so a server may reroute through the one and
+ * decorate through the other.
  */
 final class ChatPacket extends DataPacket implements ClientboundPacket, ServerboundPacket{
 
@@ -30,14 +31,18 @@ final class ChatPacket extends DataPacket implements ClientboundPacket, Serverbo
 
 	private SignedChat $signedChat;
 
+	/** Null for the default chat. */
+	private ?string $roomId;
+
 	private ?ChatFormatting $formatting;
 
 	/**
 	 * @generate-create-func
 	 */
-	public static function create(SignedChat $signedChat, ?ChatFormatting $formatting) : self{
+	public static function create(SignedChat $signedChat, ?string $roomId, ?ChatFormatting $formatting) : self{
 		$result = new self;
 		$result->signedChat = $signedChat;
+		$result->roomId = $roomId;
 		$result->formatting = $formatting;
 		return $result;
 	}
@@ -46,17 +51,23 @@ final class ChatPacket extends DataPacket implements ClientboundPacket, Serverbo
 		return $this->signedChat;
 	}
 
+	public function getRoomId() : ?string{
+		return $this->roomId;
+	}
+
 	public function getFormatting() : ?ChatFormatting{
 		return $this->formatting;
 	}
 
 	protected function decodePayload(ByteBufferReader $in) : void{
 		$this->signedChat = SignedChat::read($in);
+		$this->roomId = CommonTypes::readOptional($in, CommonTypes::getString(...));
 		$this->formatting = CommonTypes::readOptional($in, ChatFormatting::read(...));
 	}
 
 	protected function encodePayload(ByteBufferWriter $out) : void{
 		$this->signedChat->write($out);
+		CommonTypes::writeOptional($out, $this->roomId, CommonTypes::putString(...));
 		CommonTypes::writeOptional($out, $this->formatting, static fn(ByteBufferWriter $out, ChatFormatting $chatFormatting) => $chatFormatting->write($out));
 	}
 

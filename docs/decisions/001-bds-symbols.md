@@ -1,7 +1,7 @@
 # 001 Linux BDS ships no symbols, so data extraction is packet-based
 
 Date: 2026-11-03
-Status: proposed
+Status: accepted
 Milestone: M1
 Issue: pmmp-updater#3
 
@@ -60,10 +60,17 @@ symbols, in the zip or beside it.
 
 #3 takes the packet-based route. BDS runs headless in the container on 127.0.0.1, a
 client session against it is recorded by a tracer that sits between client and server,
-and the data is read from what BDS sends: `StartGamePacket` and `ItemRegistryPacket` for
-the block palette and item table, `CreativeContentPacket` for the creative inventory,
-`CraftingDataPacket` for recipes. No part of #3 depends on a BDS function name. Any
-bds-modding-devkit part that hooks BDS functions by name is not forked.
+and the data is read from what BDS sends: `ItemRegistryPacket` for the item table,
+`StartGamePacket` for the data-driven blocks, `CreativeContentPacket` for the creative
+inventory, `CraftingDataPacket` for recipes. No part of #3 depends on a BDS function name.
+Any bds-modding-devkit part that hooks BDS functions by name is not forked.
+
+The vanilla block palette is not on the wire. `StartGamePacket::$blockPalette` carries
+only the data-driven entries, which pmmp-core fills from `DATA_DRIVEN_BLOCKS_NBT`
+(`src/network/mcpe/cache/StaticPacketCache.php:173`, sent at
+`src/network/mcpe/handler/PreSpawnPacketHandler.php:125`), and `blockPaletteChecksum` is a
+hash. A capture therefore gives `data_driven_blocks.nbt`, never
+`canonical_block_states.nbt`. ADR 002 names the source of each BedrockData file.
 
 ## Why
 

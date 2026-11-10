@@ -275,6 +275,7 @@ class PacketPool{
 		$this->registerPacket(new ClientboundPlayAudioContentPacket());
 		$this->registerPacket(new ServerboundRegisterAudioContentPacket());
 		$this->registerPacket(new ChatPacket());
+		$this->registerPacket(new ServerboundRequestOnlineMusicPlaybackPacket());
 		$this->registerPacket(new PlayerToggleArmorVisibilityRequestPacket());
 	}
 

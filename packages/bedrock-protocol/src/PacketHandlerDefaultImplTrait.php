@@ -982,6 +982,10 @@ trait PacketHandlerDefaultImplTrait{
 		return false;
 	}
 
+	public function handleServerboundRequestOnlineMusicPlayback(ServerboundRequestOnlineMusicPlaybackPacket $packet) : bool{
+		return false;
+	}
+
 	public function handlePlayerToggleArmorVisibilityRequest(PlayerToggleArmorVisibilityRequestPacket $packet) : bool{
 		return false;
 	}

@@ -113,4 +113,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { LINKS_URL, IMAGE, parseArgs, selectBuild, dockerArgs, main };
+module.exports = { LINKS_URL, IMAGE, DOWNLOAD_TYPES, parseArgs, selectBuild, readLinks, download, dockerArgs, main };

@@ -498,5 +498,7 @@ interface PacketHandlerInterface{
 
 	public function handleChat(ChatPacket $packet) : bool;
 
+	public function handleServerboundRequestOnlineMusicPlayback(ServerboundRequestOnlineMusicPlaybackPacket $packet) : bool;
+
 	public function handlePlayerToggleArmorVisibilityRequest(PlayerToggleArmorVisibilityRequestPacket $packet) : bool;
 }

@@ -497,4 +497,8 @@ interface PacketHandlerInterface{
 	public function handleServerboundRequestOnlineMusicPlayback(ServerboundRequestOnlineMusicPlaybackPacket $packet) : bool;
 
 	public function handlePlayerToggleArmorVisibilityRequest(PlayerToggleArmorVisibilityRequestPacket $packet) : bool;
+
+	public function handleVirtualContainerOpen(VirtualContainerOpenPacket $packet) : bool;
+
+	public function handleVirtualContainerClose(VirtualContainerClosePacket $packet) : bool;
 }

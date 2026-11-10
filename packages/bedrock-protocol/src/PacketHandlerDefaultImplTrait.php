@@ -618,14 +618,6 @@ trait PacketHandlerDefaultImplTrait{
 		return false;
 	}
 
-	public function handleAddVolumeEntity(AddVolumeEntityPacket $packet) : bool{
-		return false;
-	}
-
-	public function handleRemoveVolumeEntity(RemoveVolumeEntityPacket $packet) : bool{
-		return false;
-	}
-
 	public function handleSimulationType(SimulationTypePacket $packet) : bool{
 		return false;
 	}

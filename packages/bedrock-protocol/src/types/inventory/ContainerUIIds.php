@@ -87,8 +87,17 @@ final class ContainerUIIds{
 	public const RECIPE_FOOD_CONTAINER = 64;
 	public const RECIPE_BLOCKS_CONTAINER = 65;
 	public const RECIPE_FURNACE_ITEMS_CONTAINER = 66;
-	public const RESERVED_CONTAINER_A = 67;
-	public const RESERVED_CONTAINER_B = 68;
-	public const RESERVED_CONTAINER_C = 69;
-	public const RESERVED_CONTAINER_D = 70;
+	public const DISC_PRESS_BLOCK = 67;
+	public const DISC_PRESS_DYE = 68;
+	public const DISC_PRESS_DISC = 69;
+	public const DISC_PRESS_RESULT_PREVIEW = 70;
+
+	/** @deprecated */
+	public const RESERVED_CONTAINER_A = self::DISC_PRESS_BLOCK;
+	/** @deprecated */
+	public const RESERVED_CONTAINER_B = self::DISC_PRESS_DYE;
+	/** @deprecated */
+	public const RESERVED_CONTAINER_C = self::DISC_PRESS_DISC;
+	/** @deprecated */
+	public const RESERVED_CONTAINER_D = self::DISC_PRESS_RESULT_PREVIEW;
 }

@@ -34,6 +34,11 @@ class PlaySoundPacket extends DataPacket implements ClientboundPacket{
 	public bool $bypassListenerRangeCheck = false;
 	public ?int $serverSoundHandle = null;
 	public ?float $playbackPositionSeconds = null;
+	/**
+	 * Null starts playback once the sound is ready. A value, zero included, starts the playback timeline after that
+	 * many seconds even if the sound is still loading, and the sound seeks to the elapsed position when it is ready.
+	 */
+	public ?float $startDelaySeconds = null;
 
 	/**
 	 * @generate-create-func
@@ -49,6 +54,7 @@ class PlaySoundPacket extends DataPacket implements ClientboundPacket{
 		bool $bypassListenerRangeCheck,
 		?int $serverSoundHandle,
 		?float $playbackPositionSeconds,
+		?float $startDelaySeconds,
 	) : self{
 		$result = new self;
 		$result->soundName = $soundName;
@@ -61,6 +67,7 @@ class PlaySoundPacket extends DataPacket implements ClientboundPacket{
 		$result->bypassListenerRangeCheck = $bypassListenerRangeCheck;
 		$result->serverSoundHandle = $serverSoundHandle;
 		$result->playbackPositionSeconds = $playbackPositionSeconds;
+		$result->startDelaySeconds = $startDelaySeconds;
 		return $result;
 	}
 
@@ -76,6 +83,7 @@ class PlaySoundPacket extends DataPacket implements ClientboundPacket{
 		$this->bypassListenerRangeCheck = CommonTypes::getBool($in);
 		$this->serverSoundHandle = CommonTypes::readOptional($in, LE::readUnsignedLong(...));
 		$this->playbackPositionSeconds = CommonTypes::readOptional($in, LE::readFloat(...));
+		$this->startDelaySeconds = CommonTypes::readOptional($in, LE::readFloat(...));
 	}
 
 	protected function encodePayload(ByteBufferWriter $out) : void{
@@ -87,6 +95,7 @@ class PlaySoundPacket extends DataPacket implements ClientboundPacket{
 		CommonTypes::putBool($out, $this->bypassListenerRangeCheck);
 		CommonTypes::writeOptional($out, $this->serverSoundHandle, LE::writeUnsignedLong(...));
 		CommonTypes::writeOptional($out, $this->playbackPositionSeconds, LE::writeFloat(...));
+		CommonTypes::writeOptional($out, $this->startDelaySeconds, LE::writeFloat(...));
 	}
 
 	public function handle(PacketHandlerInterface $handler) : bool{

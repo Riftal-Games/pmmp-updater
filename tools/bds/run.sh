@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Runs inside the container tools/bds/record.js starts, alone on an isolated network.
-# Usage: run.sh <bds zip> <node tarball> <node sha256>
+# Usage: run.sh <bds zip> <node tarball> <node sha256> <nethernet|raknet>
 # Checks and unpacks the pinned Node from the read-only /node mount with the container's
 # own tools, unpacks BDS from the read-only cache onto the container's disk with it,
-# starts BDS offline and runs tracer.js against it on 127.0.0.1.
+# starts BDS offline on the given transport and runs tracer.js against it on the same one.
 set -euo pipefail
 
 # Node looks in these before NODE_PATH, so a package installed there would be loaded in
@@ -40,10 +40,9 @@ export NODE_PATH=$PWD/deps/node_modules
 "$node" /tool/unzip.js "/bds/$1" bds
 cd bds
 
-# The tracer speaks RakNet only, and BDS still listens on it with transport=raknet, though
-# it warns that logins need NetherNet. A key Mojang renames would otherwise leave its
-# default in place, online mode included.
-for kv in online-mode=false allow-list=false transport=raknet enable-lan-visibility=false; do
+# BDS still listens with transport=raknet, though it logs that only NetherNet takes logins.
+# A key Mojang renames would otherwise leave its default in place, online mode included.
+for kv in online-mode=false allow-list=false "transport=$4" enable-lan-visibility=false; do
 	sed -i "s/^${kv%%=*}=.*/$kv/" server.properties
 	grep -qx "$kv" server.properties || { echo "server.properties has no ${kv%%=*} key" >&2; exit 1; }
 done
@@ -61,7 +60,7 @@ fi
 sockets "after Server started"
 
 status=0
-timeout 120 "$node" /tool/tracer.js --protocol-info /proto/protocol_info.json --out /out || status=$?
+timeout 120 "$node" /tool/tracer.js --protocol-info /proto/protocol_info.json --out /out --transport "$4" || status=$?
 sockets "after the session"
 echo "== bds.log" >&2
 cat bds.log >&2

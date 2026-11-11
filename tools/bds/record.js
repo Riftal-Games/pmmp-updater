@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 'use strict';
 
-// Records one client session against a Linux BDS. Downloads the build into the cache as
-// inspect.js does, then runs run.sh in the pinned ubuntu:24.04 container, alone on an
-// internal network in isolated gateway mode and with no published port: BDS from the
-// read-only cache mount, tracer.js beside it in the same container, the capture written
-// to <cache>/captures/<build>/capture.bin.
+// Records one client session against a Linux BDS. Downloads the build, the pinned Node and
+// the locked packages into the cache, then runs run.sh in the pinned ubuntu:24.04
+// container, alone on an internal network in isolated gateway mode and with no published
+// port: BDS from the read-only cache mount, tracer.js beside it in the same container on
+// the chosen transport, the capture written to <cache>/captures/<build>/capture.bin.
 //
 // Usage: node tools/bds/record.js [--channel release|preview] [--links-file <json>]
-//   [--cache <dir>] [--docker <command>] [--dry-run]
+//   [--cache <dir>] [--docker <command>] [--transport nethernet|raknet] [--dry-run]
 //
 // Run it where docker is local, as inspect.js says.
 
@@ -89,7 +89,7 @@ async function npmTarballs(cacheDir, log, lock = LOCK, get = fetch) {
 	}
 }
 
-function dockerArgs(build, cacheDir, outDir, user) {
+function dockerArgs(build, cacheDir, outDir, user, transport = 'nethernet') {
 	return [
 		'run', '--rm', '--init', '--name', `riftal_smoke_bds_record_${process.pid}`,
 		'--network', `${NET_PREFIX}${process.pid}`, '-m', '2g', '--cpus', '2', '--user', user, '-e', 'HOME=/tmp',
@@ -99,7 +99,7 @@ function dockerArgs(build, cacheDir, outDir, user) {
 		'-v', `${__dirname}:/tool:ro`,
 		'-v', `${PROTOCOL_INFO}:/proto/protocol_info.json:ro`,
 		'-v', `${outDir}:/out`,
-		inspect.IMAGE, 'bash', '/tool/run.sh', build.file, NODE.file, NODE.sha256,
+		inspect.IMAGE, 'bash', '/tool/run.sh', build.file, NODE.file, NODE.sha256, transport,
 	];
 }
 
@@ -180,11 +180,14 @@ async function fetchInputs(build, cacheDir, log) {
 }
 
 async function main(argv, log = (s) => process.stdout.write(`${s}\n`), { seconds = SECONDS, fetchAll = fetchInputs } = {}) {
-	const a = inspect.parseArgs(argv);
+	const at = argv.indexOf('--transport');
+	const transport = at < 0 ? 'nethernet' : argv[at + 1];
+	if (!['nethernet', 'raknet'].includes(transport)) throw new Error('--transport must be nethernet or raknet');
+	const a = inspect.parseArgs(at < 0 ? argv : [...argv.slice(0, at), ...argv.slice(at + 2)]);
 	const build = inspect.selectBuild(await inspect.readLinks(a), a.channel);
 	const out = path.join(a.cache, 'captures', build.build);
 	const me = os.userInfo();
-	const run = dockerArgs(build, a.cache, out, `${me.uid}:${me.gid}`);
+	const run = dockerArgs(build, a.cache, out, `${me.uid}:${me.gid}`, transport);
 	const [container, net] = ['--name', '--network'].map((k) => run[run.indexOf(k) + 1]);
 	const args = ['--kill-after=10', String(seconds), a.docker, ...run];
 	log(`BDS Linux ${build.channel} ${build.build}: ${build.url}`);

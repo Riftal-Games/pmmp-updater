@@ -15,6 +15,11 @@ test('run.sh refuses a node_modules Node would load before the locked packages, 
 	assert.match(RUN.slice(guard, RUN.indexOf('done', guard)), /if \[ -e "\$d" \]; then[\s\S]*exit 1/);
 });
 
+test('run.sh sets BDS and the tracer to the transport record.js names, with LAN visibility off', () => {
+	assert.match(RUN, /^for kv in online-mode=false allow-list=false "transport=\$4" enable-lan-visibility=false; do$/m);
+	assert.match(RUN, /tracer\.js --protocol-info \/proto\/protocol_info\.json --out \/out --transport "\$4"/);
+});
+
 test('run.sh parses', { skip: process.platform === 'win32' && 'bash -n needs a POSIX shell' }, () => {
 	assert.equal(spawnSync('bash', ['-n', SCRIPT]).status, 0);
 });

@@ -2,19 +2,21 @@
 'use strict';
 
 // A headless offline Bedrock client, run beside the server in its isolated container.
-// It joins on 127.0.0.1 over RakNet, logs in self-signed, answers
+// It joins over NetherNet, or over RakNet on 127.0.0.1, logs in self-signed, answers
 // the encryption handshake and the resource pack prompts, and records every packet the
 // server sends, decrypted and decompressed, into capture.bin. The protocol number and
 // packet IDs come from packages/bedrock-data's protocol_info.json, and what it sends is
 // laid out as packages/bedrock-protocol encodes it.
 //
 // Usage: node tracer.js --protocol-info <json> --out <dir> [--port <n>] [--deadline <seconds>]
+//   [--transport nethernet|raknet]
 
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const util = require('util');
 const zlib = require('zlib');
+const nethernet = require('./nethernet');
 const raknet = require('./raknet');
 
 const NAME = 'PmmpUpdater';
@@ -107,6 +109,9 @@ function jwt(body, keys) {
 function loginPacket(ids, info, keys, port) {
 	const uuid = crypto.randomUUID();
 	const now = Math.floor(Date.now() / 1000);
+	// Random, so the compressed login is larger than one NetherNet segment and every run
+	// shows BDS joining segments.
+	const skin = crypto.randomBytes(64 * 64 * 4).toString('base64');
 	const token = jwt({ iat: now, nbf: now - 60, exp: now + 3600, aud: 'api://auth-minecraft-services/multiplayer', cpk: keys.der, leguuid: uuid, xname: NAME, mid: uuid, ap: 0, nid: '', nname: '', pid: '', pname: '', xid: '' }, keys);
 	const auth = JSON.stringify({ AuthenticationType: 2, Token: token });
 	const v = info.version;
@@ -114,7 +119,7 @@ function loginPacket(ids, info, keys, port) {
 		AnimatedImageData: [], ArmSize: 'wide', CapeData: '', CapeId: '', CapeImageHeight: 0, CapeImageWidth: 0, CapeOnClassicSkin: false, ClientEditorConnectionIntent: 0, ClientIsEditorCapable: false, ClientRandomId: crypto.randomInt(2 ** 47),
 		CompatibleWithClientSideChunkGen: false, CurrentInputMode: 1, DefaultInputMode: 1, DeviceId: uuid, DeviceModel: 'pmmp-updater', DeviceOS: 7, FilterProfanity: false, GameVersion: `${v.major}.${v.minor}.${v.patch}`, GraphicsMode: 1, GuiScale: 0,
 		LanguageCode: 'en_US', MaxViewDistance: 8, MemoryTier: 0, OverrideSkin: false, PartyId: '', IsPartyLeader: false, PlatformUserId: '', PersonaPieces: [], PersonaSkin: false, PieceTintColors: [], PlatformOfflineId: '', PlatformOnlineId: '', PlatformType: 0, PremiumSkin: false, ProfileHash: '', SelfSignedId: uuid,
-		ServerAddress: `127.0.0.1:${port}`, SkinAnimationData: '', SkinColor: '#0', SkinData: Buffer.alloc(64 * 64 * 4, 0xff).toString('base64'), SkinGeometryData: Buffer.from(JSON.stringify({ format_version: '1.12.0', 'minecraft:geometry': [{ description: { identifier: 'geometry.humanoid.custom', texture_width: 64, texture_height: 64 }, bones: [] }] })).toString('base64'), SkinGeometryDataEngineVersion: Buffer.from('1.14.0').toString('base64'), SkinId: NAME, SkinImageHeight: 64, SkinImageWidth: 64,
+		ServerAddress: `127.0.0.1:${port}`, SkinAnimationData: '', SkinColor: '#0', SkinData: skin, SkinGeometryData: Buffer.from(JSON.stringify({ format_version: '1.12.0', 'minecraft:geometry': [{ description: { identifier: 'geometry.humanoid.custom', texture_width: 64, texture_height: 64 }, bones: [] }] })).toString('base64'), SkinGeometryDataEngineVersion: Buffer.from('1.14.0').toString('base64'), SkinId: NAME, SkinImageHeight: 64, SkinImageWidth: 64,
 		SkinResourcePatch: Buffer.from(JSON.stringify({ geometry: { default: 'geometry.humanoid.custom' } })).toString('base64'), ThirdPartyName: NAME, TrustedSkin: false, UIProfile: 0,
 	}, keys);
 	const request = Buffer.concat([u32(auth.length, true), Buffer.from(auth), u32(data.length, true), Buffer.from(data)]);
@@ -137,10 +142,11 @@ function encodeCapture(records) {
 }
 
 function parseArgs(args) {
-	const { values: v } = util.parseArgs({ args, strict: true, options: { 'protocol-info': { type: 'string' }, out: { type: 'string' }, port: { type: 'string', default: '19132' }, deadline: { type: 'string', default: '90' } } });
+	const { values: v } = util.parseArgs({ args, strict: true, options: { 'protocol-info': { type: 'string' }, out: { type: 'string' }, port: { type: 'string', default: '19132' }, deadline: { type: 'string', default: '90' }, transport: { type: 'string', default: 'nethernet' } } });
 	if (!v['protocol-info'] || !v.out) throw new Error('--protocol-info and --out are required');
-	const a = { protocol_info: v['protocol-info'], out: v.out, port: Number(v.port), deadline: Number(v.deadline) };
+	const a = { protocol_info: v['protocol-info'], out: v.out, port: Number(v.port), deadline: Number(v.deadline), transport: v.transport };
 	if (!(a.port > 0 && a.port < 65536) || !(a.deadline > 0)) throw new Error('--port and --deadline must be positive numbers');
+	if (!['nethernet', 'raknet'].includes(a.transport)) throw new Error('--transport must be nethernet or raknet');
 	return a;
 }
 
@@ -151,7 +157,7 @@ function trace(a, log) {
 	const keys = makeKeys();
 	const state = { compressed: false, cipher: null };
 	const records = [];
-	const link = raknet.transport(a.port);
+	const link = a.transport === 'raknet' ? raknet.transport(a.port) : nethernet.transport({ port: a.port, info, keys, log });
 	return new Promise((resolve) => {
 		let done = false;
 		const finish = (error) => {

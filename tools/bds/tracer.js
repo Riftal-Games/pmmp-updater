@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
-// A headless offline Bedrock client, run beside the server in a container whose only
-// network is loopback. It joins on 127.0.0.1 over RakNet, logs in self-signed, answers
+// A headless offline Bedrock client, run beside the server in its isolated container.
+// It joins on 127.0.0.1 over RakNet, logs in self-signed, answers
 // the encryption handshake and the resource pack prompts, and records every packet the
 // server sends, decrypted and decompressed, into capture.bin. The protocol number and
 // packet IDs come from packages/bedrock-data's protocol_info.json, and what it sends is

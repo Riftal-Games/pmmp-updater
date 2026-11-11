@@ -23,7 +23,9 @@ test('the container is on its own smoke network only, with limits, a smoke name,
 	const mounts = args.filter((_, i) => args[i - 1] === '-v');
 	assert.deepEqual(mounts.filter((m) => !m.endsWith(':ro')), ['/cache/bds/captures/9.8.7.6:/out']);
 	assert.ok(mounts.includes('/cache/bds:/bds:ro'));
-	assert.ok(mounts.some((m) => /^[/\\]cache[/\\]bds[/\\]node:\/node:ro$/.test(m)));	assert.ok(mounts.some((m) => /packages[\\/]bedrock-data[\\/]protocol_info\.json:\/proto\/protocol_info\.json:ro$/.test(m)));
+	assert.ok(mounts.some((m) => /^[/\\]cache[/\\]bds[/\\]node:\/node:ro$/.test(m)));
+	assert.ok(mounts.some((m) => /^[/\\]cache[/\\]bds[/\\]npm:\/npm:ro$/.test(m)));
+	assert.ok(mounts.some((m) => /packages[\\/]bedrock-data[\\/]protocol_info\.json:\/proto\/protocol_info\.json:ro$/.test(m)));
 	assert.deepEqual(mounts.filter((m) => /^\/(usr|lib|bin|opt)\//.test(m)), [], 'nothing from the host system is mounted');
 	assert.match(args[args.indexOf('bash') - 1], /^ubuntu:24\.04@sha256:[0-9a-f]{64}$/);
 	assert.deepEqual(args.slice(-5), ['bash', '/tool/run.sh', 'bedrock-server-9.8.7.6.zip', record.NODE.file, record.NODE.sha256]);

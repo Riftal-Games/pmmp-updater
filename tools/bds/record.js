@@ -30,34 +30,63 @@ const NODE = {
 	url: 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.gz',
 	sha256: 'b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406',
 };
+const LOCK = require('./package-lock.json');
+const LICENCES = ['MIT', 'ISC', 'BSD-2-Clause', 'BSD-3-Clause', 'Apache-2.0', 'MPL-2.0'];
 const NET_PREFIX = 'riftal_smoke_bds_net_';
 const ISOLATED = 'com.docker.network.bridge.gateway_mode_ipv4';
 
-function sha256(body) {
-	return crypto.createHash('sha256').update(body).digest('hex');
-}
+const digest = (algo, body) => crypto.createHash(algo).update(body).digest('hex');
 
-// The cached tarball is checked on every run, and a download is renamed into place only
-// once its hash matches, so the container never sees a Node that is not the pinned one.
-async function nodeTarball(cacheDir, log, pin = NODE, get = fetch) {
-	const dest = path.join(cacheDir, 'node', pin.file);
+// The cached file is checked on every run, and a download is renamed into place only once
+// its hash matches, so the container never sees a file that is not the pinned one.
+async function pinnedFile(dest, url, algo, want, log, get) {
 	if (fs.existsSync(dest)) {
-		const got = sha256(fs.readFileSync(dest));
-		if (got !== pin.sha256) throw new Error(`cached ${dest} has sha256 ${got}, expected ${pin.sha256}`);
+		const got = digest(algo, fs.readFileSync(dest));
+		if (got !== want) throw new Error(`cached ${dest} has ${algo} ${got}, expected ${want}`);
 		log(`cached ${dest}`);
 		return dest;
 	}
-	log(`downloading ${pin.url}`);
-	const res = await get(pin.url, { signal: AbortSignal.timeout(300000) });
-	if (!res.ok) throw new Error(`Node download: HTTP ${res.status}`);
+	log(`downloading ${url}`);
+	const res = await get(url, { signal: AbortSignal.timeout(300000) });
+	if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
 	const body = Buffer.from(await res.arrayBuffer());
-	const got = sha256(body);
-	if (got !== pin.sha256) throw new Error(`Node download: sha256 ${got}, expected ${pin.sha256}`);
+	const got = digest(algo, body);
+	if (got !== want) throw new Error(`${url}: ${algo} ${got}, expected ${want}`);
 	fs.mkdirSync(path.dirname(dest), { recursive: true });
 	fs.writeFileSync(`${dest}.part`, body);
 	fs.renameSync(`${dest}.part`, dest);
-	log(`saved ${dest}, sha256 ${got}`);
+	log(`saved ${dest}, ${algo} ${got}`);
 	return dest;
+}
+
+function nodeTarball(cacheDir, log, pin = NODE, get = fetch) {
+	return pinnedFile(path.join(cacheDir, 'node', pin.file), pin.url, 'sha256', pin.sha256, log, get);
+}
+
+// Every way ADR 003 says a locked package may not reach the run.
+function lockProblems(lock) {
+	const out = lock.lockfileVersion === 3 ? [] : [`lockfileVersion ${lock.lockfileVersion}`];
+	for (const [key, e] of Object.entries(lock.packages || {})) {
+		if (!key) continue;
+		if (!String(e.resolved).startsWith('https://registry.npmjs.org/')) out.push(`${key}: resolved ${e.resolved}`);
+		if (!/^sha512-[A-Za-z0-9+/]{86}==$/.test(e.integrity)) out.push(`${key}: no sha512 integrity`);
+		if (e.hasInstallScript) out.push(`${key}: install script`);
+		for (const f of ['os', 'cpu', 'optional']) if (f in e) out.push(`${key}: ${f}`);
+		if (!LICENCES.includes(e.license)) out.push(`${key}: licence ${e.license}`);
+	}
+	return out;
+}
+
+// Each tarball is cached under the hex of its sha512, the name run.sh checks it by. None
+// is required or unpacked here, so the dependency never runs on the host.
+async function npmTarballs(cacheDir, log, lock = LOCK, get = fetch) {
+	const bad = lockProblems(lock);
+	if (bad.length) throw new Error(`package-lock.json: ${bad.join('; ')}`);
+	for (const [key, e] of Object.entries(lock.packages)) {
+		if (!key) continue;
+		const hex = Buffer.from(e.integrity.slice(7), 'base64').toString('hex');
+		await pinnedFile(path.join(cacheDir, 'npm', `${hex}.tgz`), e.resolved, 'sha512', hex, log, get);
+	}
 }
 
 function dockerArgs(build, cacheDir, outDir, user) {
@@ -66,6 +95,7 @@ function dockerArgs(build, cacheDir, outDir, user) {
 		'--network', `${NET_PREFIX}${process.pid}`, '-m', '2g', '--cpus', '2', '--user', user, '-e', 'HOME=/tmp',
 		'-v', `${cacheDir}:/bds:ro`,
 		'-v', `${path.join(cacheDir, 'node')}:/node:ro`,
+		'-v', `${path.join(cacheDir, 'npm')}:/npm:ro`,
 		'-v', `${__dirname}:/tool:ro`,
 		'-v', `${PROTOCOL_INFO}:/proto/protocol_info.json:ro`,
 		'-v', `${outDir}:/out`,
@@ -146,6 +176,7 @@ async function onIsolatedNetwork(cmd, name, container, log, start) {
 async function fetchInputs(build, cacheDir, log) {
 	await inspect.download(build, cacheDir, log);
 	await nodeTarball(cacheDir, log);
+	await npmTarballs(cacheDir, log);
 }
 
 async function main(argv, log = (s) => process.stdout.write(`${s}\n`), { seconds = SECONDS, fetchAll = fetchInputs } = {}) {
@@ -186,4 +217,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { SECONDS, NODE, nodeTarball, dockerArgs, main };
+module.exports = { SECONDS, NODE, nodeTarball, lockProblems, npmTarballs, dockerArgs, main };

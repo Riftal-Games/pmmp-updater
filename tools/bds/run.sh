@@ -8,9 +8,25 @@ set -euo pipefail
 
 cd "$(mktemp -d)"
 echo "$3  /node/$2" | sha256sum --check --quiet
-mkdir node bds
+mkdir node bds deps
 tar -xzf "/node/$2" -C node --strip-components=1
 node=$PWD/node/bin/node
+
+# The locked packages are checked again here and unpacked at their lockfile paths. No npm
+# and no install script runs, and a native addon would be code the lockfile cannot pin.
+"$node" -e 'for (const [k, e] of Object.entries(require(process.argv[1]).packages)) if (k) console.log(Buffer.from(e.integrity.slice(7), "base64").toString("hex"), k)' /tool/package-lock.json |
+	while read -r hex dir; do
+		echo "$hex  /npm/$hex.tgz" | sha512sum --check --quiet
+		mkdir -p "deps/$dir"
+		tar -xzf "/npm/$hex.tgz" -C "deps/$dir" --strip-components=1
+	done
+if find deps -name '*.node' | grep .; then
+	echo "a native .node file is in the locked packages" >&2
+	exit 1
+fi
+"$node" -e 'const l = require(process.argv[1]).packages; const ks = Object.keys(l).filter(Boolean); for (const k of ks) if (require(`${process.cwd()}/deps/${k}/package.json`).version !== l[k].version) throw new Error(`${k} is not ${l[k].version}`); console.error(`unpacked ${ks.length} locked packages`)' /tool/package-lock.json
+export NODE_PATH=$PWD/deps/node_modules
+
 "$node" /tool/unzip.js "/bds/$1" bds
 cd bds
 

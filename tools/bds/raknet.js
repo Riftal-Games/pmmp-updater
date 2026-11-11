@@ -88,9 +88,11 @@ class Session {
 	}
 }
 
-// A transport is { open(onMessage, onClose), send(batch), close() }. open resolves once
-// the server accepts the connection. onMessage gets each game batch, 0xfe included, and
-// onClose gets the error that ends the connection, including one onMessage throws.
+// A transport is { open(onMessage, onClose), send(batch), close() }, where a batch is the
+// game layer's bytes; RakNet carries it behind 0xfe, which this one adds and strips. open
+// resolves once batches can be sent. onClose is called at most once, with the error that
+// ends the connection, and no batch reaches onMessage after it. close() releases the
+// connection and may be called again.
 function transport(port) {
 	const socket = dgram.createSocket('udp4');
 	const guid = crypto.randomBytes(8);
@@ -98,8 +100,13 @@ function transport(port) {
 	let session = null;
 	let knock = null;
 	let bound = false;
+	let ended = false;
 	return {
-		open(onMessage, onClose) {
+		open(onMessage, onEnd) {
+			const onClose = (e) => {
+				if (!ended) onEnd(e);
+				ended = true;
+			};
 			return new Promise((resolve) => {
 				session = new Session(raw, (m) => {
 					try {
@@ -108,7 +115,7 @@ function transport(port) {
 							resolve();
 						} else if (m[0] === 0x00) session.send(Buffer.concat([Buffer.from([0x03]), m.subarray(1, 9), Buffer.alloc(8)]));
 						else if (m[0] === 0x15) throw new Error('the server closed the RakNet connection');
-						else if (m[0] === 0xfe) onMessage(m);
+						else if (m[0] === 0xfe && !ended) onMessage(m.subarray(1));
 					} catch (e) {
 						onClose(e);
 					}
@@ -129,8 +136,9 @@ function transport(port) {
 				bound = true;
 			});
 		},
-		send(batch) { session.send(batch); },
+		send(batch) { session.send(Buffer.concat([Buffer.from([0xfe]), batch])); },
 		close() {
+			ended = true;
 			if (!bound) return;
 			bound = false;
 			clearInterval(knock);

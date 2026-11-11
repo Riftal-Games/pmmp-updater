@@ -6,6 +6,15 @@
 # starts BDS offline and runs tracer.js against it on 127.0.0.1.
 set -euo pipefail
 
+# Node looks in these before NODE_PATH, so a package installed there would be loaded in
+# place of the hash-checked one.
+for d in /tool/node_modules /node_modules; do
+	if [ -e "$d" ]; then
+		echo "$d exists, and would be loaded before the locked packages" >&2
+		exit 1
+	fi
+done
+
 cd "$(mktemp -d)"
 echo "$3  /node/$2" | sha256sum --check --quiet
 mkdir node bds deps
@@ -13,7 +22,8 @@ tar -xzf "/node/$2" -C node --strip-components=1
 node=$PWD/node/bin/node
 
 # The locked packages are checked again here and unpacked at their lockfile paths. No npm
-# and no install script runs, and a native addon would be code the lockfile cannot pin.
+# and no install script runs, and no native addon is accepted: it is a binary built
+# elsewhere, which we can neither review nor rebuild.
 "$node" -e 'for (const [k, e] of Object.entries(require(process.argv[1]).packages)) if (k) console.log(Buffer.from(e.integrity.slice(7), "base64").toString("hex"), k)' /tool/package-lock.json |
 	while read -r hex dir; do
 		echo "$hex  /npm/$hex.tgz" | sha512sum --check --quiet

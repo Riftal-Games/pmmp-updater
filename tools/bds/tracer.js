@@ -11,16 +11,13 @@
 // Usage: node tracer.js --protocol-info <json> --out <dir> [--port <n>] [--deadline <seconds>]
 
 const crypto = require('crypto');
-const dgram = require('dgram');
 const fs = require('fs');
 const path = require('path');
 const util = require('util');
 const zlib = require('zlib');
+const raknet = require('./raknet');
 
-const MAGIC = Buffer.from('00ffff00fefefefefdfdfdfd12345678', 'hex');
-const MTU = 1400;
 const NAME = 'PmmpUpdater';
-const ORDERED = new Set([1, 3, 4, 7]);
 // Every packet ADR 002 sources a BedrockData file from. The session ends once all arrived.
 const WANTED = ['StartGamePacket', 'ItemRegistryPacket', 'CreativeContentPacket', 'CraftingDataPacket', 'BiomeDefinitionListPacket', 'AvailableActorIdentifiersPacket', 'JigsawStructureDataPacket', 'VoxelShapesPacket'];
 
@@ -43,83 +40,6 @@ function readVarint(buf, at) {
 }
 
 const u32 = (n, le) => { const b = Buffer.alloc(4); b[le ? 'writeUInt32LE' : 'writeUInt32BE'](n); return b; };
-// RakNet writes an IPv4 address with every octet inverted.
-const LOOPBACK = (port) => Buffer.from([4, 0x80, 0xff, 0xff, 0xfe, port >> 8, port & 0xff]);
-
-// The only frame this client sends: reliable ordered on channel 0, split to fit the MTU.
-function encodeFrame(body, reliableIndex, orderIndex, split) {
-	const head = Buffer.alloc(split ? 20 : 10);
-	head[0] = 0x60 | (split ? 0x10 : 0);
-	head.writeUInt16BE(body.length * 8, 1);
-	head.writeUIntLE(reliableIndex, 3, 3);
-	head.writeUIntLE(orderIndex, 6, 3);
-	if (split) { head.writeUInt32BE(split.count, 10); head.writeUInt16BE(split.id, 14); head.writeUInt32BE(split.index, 16); }
-	return Buffer.concat([head, body]);
-}
-
-function decodeFrames(datagram) {
-	const frames = [];
-	for (let at = 4; at < datagram.length;) {
-		const [flags, length] = [datagram[at], Math.ceil(datagram.readUInt16BE(at + 1) / 8)];
-		const f = { reliability: flags >> 5 };
-		at += 3;
-		if ([2, 3, 4, 6, 7].includes(f.reliability)) { f.reliableIndex = datagram.readUIntLE(at, 3); at += 3; }
-		if (f.reliability === 1 || f.reliability === 4) at += 3;
-		if (ORDERED.has(f.reliability)) { f.orderIndex = datagram.readUIntLE(at, 3); at += 4; }
-		if (flags & 0x10) { f.split = { count: datagram.readUInt32BE(at), id: datagram.readUInt16BE(at + 4), index: datagram.readUInt32BE(at + 6) }; at += 10; }
-		f.body = datagram.subarray(at, at + length);
-		if (f.body.length !== length || (f.split && (f.split.index >= f.split.count || f.split.count > 4096))) throw new Error('malformed RakNet frame');
-		at += length;
-		frames.push(f);
-	}
-	return frames;
-}
-
-// One RakNet connection after the offline handshake. It acknowledges every datagram,
-// drops repeated frames, joins split ones and hands messages on in order: the stream is
-// encrypted with a running counter, so one message out of place breaks every later one.
-class Session {
-	constructor(send, onMessage) {
-		Object.assign(this, { sendRaw: send, onMessage, seq: 0, reliable: 0, order: 0, splitId: 0, expected: 0, seen: new Set(), splits: new Map(), held: new Map() });
-	}
-
-	send(body) {
-		const parts = [];
-		for (let i = 0; i < body.length; i += MTU - 60) parts.push(body.subarray(i, i + MTU - 60));
-		const order = this.order++;
-		const id = parts.length > 1 ? this.splitId++ & 0xffff : 0;
-		for (const [index, part] of parts.entries()) {
-			const head = Buffer.from([0x84, 0, 0, 0]);
-			head.writeUIntLE(this.seq++ & 0xffffff, 1, 3);
-			this.sendRaw(Buffer.concat([head, encodeFrame(part, this.reliable++, order, parts.length > 1 ? { count: parts.length, id, index } : null)]));
-		}
-	}
-
-	receive(datagram) {
-		if (datagram[0] & 0x60) return;
-		this.sendRaw(Buffer.concat([Buffer.from([0xc0, 0, 1, 1]), datagram.subarray(1, 4)]));
-		for (const f of decodeFrames(datagram)) this.frame(f);
-	}
-
-	frame(f) {
-		if (this.seen.has(f.reliableIndex)) return;
-		if (f.reliableIndex !== undefined) this.seen.add(f.reliableIndex);
-		let body = f.body;
-		if (f.split) {
-			const parts = this.splits.get(f.split.id) || this.splits.set(f.split.id, []).get(f.split.id);
-			parts[f.split.index] = body;
-			if (parts.filter(Boolean).length < f.split.count) return;
-			this.splits.delete(f.split.id);
-			body = Buffer.concat(parts);
-		}
-		if (!ORDERED.has(f.reliability)) return this.onMessage(body);
-		this.held.set(f.orderIndex, body);
-		for (let next; (next = this.held.get(this.expected)) !== undefined;) {
-			this.held.delete(this.expected++);
-			this.onMessage(next);
-		}
-	}
-}
 
 // Bedrock's AES-256-GCM is used as a stream: CTR from GCM's first counter block, each
 // batch followed by 8 bytes of SHA-256 over a per-direction counter, the batch and the key.
@@ -231,17 +151,15 @@ function trace(a, log) {
 	const ids = info.packets;
 	const names = new Map(Object.entries(ids).map(([n, id]) => [id, n]));
 	const keys = makeKeys();
-	const guid = crypto.randomBytes(8);
 	const state = { compressed: false, cipher: null };
 	const records = [];
-	const socket = dgram.createSocket('udp4');
-	const raw = (b) => socket.send(b, a.port, '127.0.0.1');
+	const link = raknet.transport(a.port);
 	return new Promise((resolve) => {
 		let done = false;
 		const finish = (error) => {
 			if (done) return;
 			done = true;
-			clearInterval(knock); clearTimeout(deadline); socket.close();
+			clearTimeout(deadline); link.close();
 			fs.writeFileSync(path.join(a.out, 'capture.bin.part'), encodeCapture(records));
 			fs.renameSync(path.join(a.out, 'capture.bin.part'), path.join(a.out, 'capture.bin'));
 			for (const r of records) log(`${r.id}\t${names.get(r.id) || '?'}\t${r.packet.length}`);
@@ -250,7 +168,7 @@ function trace(a, log) {
 			resolve(error || missing.length ? 1 : 0);
 		};
 		const deadline = setTimeout(() => finish(), a.deadline * 1000);
-		const game = (...packets) => session.send(encodeBatch(packets, state));
+		const game = (...packets) => link.send(encodeBatch(packets, state));
 		const onPacket = ({ id, packet }) => {
 			records.push({ id, packet });
 			const payload = packet.subarray(readVarint(packet, 0)[1]);
@@ -271,34 +189,12 @@ function trace(a, log) {
 			}
 			if (WANTED.every((n) => records.some((r) => r.id === ids[n]))) setTimeout(() => finish(), 2000);
 		};
-		const session = new Session(raw, (m) => {
-			try {
-				if (m[0] === 0x10) {
-					session.send(Buffer.concat([Buffer.from([0x13]), LOOPBACK(a.port), ...Array(20).fill(Buffer.from([4, 0xff, 0xff, 0xff, 0xff, 0, 0])), Buffer.alloc(16)]));
-					game(Buffer.concat([varint(ids.RequestNetworkSettingsPacket), u32(info.version.protocol_version)]));
-				} else if (m[0] === 0x00) session.send(Buffer.concat([Buffer.from([0x03]), m.subarray(1, 9), Buffer.alloc(8)]));
-				else if (m[0] === 0x15) throw new Error('the server closed the RakNet connection');
-				else if (m[0] === 0xfe) decodeBatch(m, state).forEach(onPacket);
-			} catch (e) {
-				finish(e);
-			}
-		});
-		socket.on('message', (b) => {
-			if (b[0] === 0x06) {
-				const cookie = b[25] ? [b.subarray(26, 30), Buffer.from([0])] : [];
-				raw(Buffer.concat([Buffer.from([0x07]), MAGIC, ...cookie, LOOPBACK(a.port), b.subarray(-2), guid]));
-			} else if (b[0] === 0x08 && session.seq === 0) {
-				clearInterval(knock);
-				session.send(Buffer.concat([Buffer.from([0x09]), guid, Buffer.alloc(8), Buffer.from([0])]));
-			} else if (b[0] & 0x80) {
-				try { session.receive(b); } catch (e) { finish(e); }
-			}
-		});
-		const knock = setInterval(() => raw(Buffer.concat([Buffer.from([0x05]), MAGIC, Buffer.from([11]), Buffer.alloc(MTU - 46)])), 500);
-		socket.bind(0, '127.0.0.1');
+		link.open((m) => decodeBatch(m, state).forEach(onPacket), finish)
+			.then(() => game(Buffer.concat([varint(ids.RequestNetworkSettingsPacket), u32(info.version.protocol_version)])))
+			.catch(finish);
 	});
 }
 
 if (require.main === module) trace(parseArgs(process.argv.slice(2)), (s) => process.stdout.write(`${s}\n`)).then((code) => { process.exitCode = code; });
 
-module.exports = { WANTED, varint, readVarint, encodeFrame, decodeFrames, Session, Cipher, encodeBatch, decodeBatch, makeKeys, jwt, loginPacket, sessionKey, encodeCapture, parseArgs };
+module.exports = { WANTED, varint, readVarint, Cipher, encodeBatch, decodeBatch, makeKeys, jwt, loginPacket, sessionKey, encodeCapture, parseArgs };

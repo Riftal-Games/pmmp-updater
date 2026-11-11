@@ -18,26 +18,6 @@ test('varints round-trip and a truncated or overlong one fails', () => {
 	assert.throws(() => t.readVarint(Buffer.alloc(6, 0xff), 0), /longer than 5/);
 });
 
-test('a frame reads back as written, split fields included, and a short one fails', () => {
-	const body = Buffer.from('payload');
-	const [f] = t.decodeFrames(Buffer.concat([Buffer.alloc(4), t.encodeFrame(body, 5, 6, { count: 3, id: 7, index: 2 })]));
-	assert.deepEqual(f, { reliability: 3, reliableIndex: 5, orderIndex: 6, split: { count: 3, id: 7, index: 2 }, body });
-	assert.throws(() => t.decodeFrames(Buffer.concat([Buffer.alloc(4), t.encodeFrame(body, 0, 0).subarray(0, -1)])), /malformed/);
-});
-
-test('split, shuffled and repeated datagrams reach the peer once each, in order', () => {
-	const [wire, acks, got] = [[], [], []];
-	const sender = new t.Session((d) => wire.push(d), () => {});
-	const big = crypto.randomBytes(5000);
-	[big, Buffer.from('second')].forEach((m) => sender.send(m));
-	const receiver = new t.Session((d) => acks.push(d), (m) => got.push(m));
-	// A reliable unordered frame, sent twice, as a server resends one it saw no ACK for.
-	const unordered = Buffer.from([0x84, 9, 0, 0, 0x40, 0, 8, 7, 0, 0, 0x75]);
-	for (const d of [4, 2, 0, 2, 3, 1, 0].map((i) => wire[i]).concat(unordered, unordered)) receiver.receive(d);
-	assert.deepEqual(got, [big, Buffer.from('second'), Buffer.from('u')]);
-	assert.deepEqual([acks.length, acks[0]], [9, Buffer.from([0xc0, 0, 1, 1, 4, 0, 0])]);
-});
-
 test('a batch survives compression and encryption in order, and a flipped byte fails its checksum', () => {
 	const [client, server] = [0, 1].map(() => ({ compressed: true, cipher: new t.Cipher(KEY) }));
 	const packets = [Buffer.concat([t.varint(11), Buffer.from('start')]), Buffer.concat([t.varint(0x1a2), Buffer.from('x')])];

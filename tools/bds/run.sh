@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs inside the container tools/bds/record.js starts, whose only network is loopback.
+# Runs inside the container tools/bds/record.js starts, alone on an isolated network.
 # Usage: run.sh <bds zip> <node tarball> <node sha256>
 # Checks and unpacks the pinned Node from the read-only /node mount with the container's
 # own tools, unpacks BDS from the read-only cache onto the container's disk with it,
@@ -22,14 +22,21 @@ for kv in online-mode=false allow-list=false transport=raknet enable-lan-visibil
 	grep -qx "$kv" server.properties || { echo "server.properties has no ${kv%%=*} key" >&2; exit 1; }
 done
 
+sockets() {
+	echo "== sockets $1" >&2
+	awk 'FNR > 1 { print FILENAME, $2, $4 }' /proc/net/tcp /proc/net/tcp6 /proc/net/udp /proc/net/udp6 >&2
+}
+
 LD_LIBRARY_PATH=. ./bedrock_server </dev/null >bds.log 2>&1 &
 if ! timeout 180 bash -c 'until grep -q "Server started" bds.log; do sleep 1; done'; then
 	cat bds.log >&2
 	exit 1
 fi
+sockets "after Server started"
 
 status=0
 timeout 120 "$node" /tool/tracer.js --protocol-info /proto/protocol_info.json --out /out || status=$?
+sockets "after the session"
 echo "== bds.log" >&2
 cat bds.log >&2
 exit "$status"

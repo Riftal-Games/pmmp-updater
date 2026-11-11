@@ -7,13 +7,15 @@ Issue: pmmp-updater#3
 
 ## Context
 
-ADR 002 sources eight BedrockData tables from packets BDS sends: `StartGamePacket`,
-`ItemRegistryPacket`, `CreativeContentPacket`, `CraftingDataPacket`,
-`BiomeDefinitionListPacket`, `AvailableActorIdentifiersPacket`,
-`JigsawStructureDataPacket`, `VoxelShapesPacket` (`WANTED`, `tools/bds/tracer.js:25`).
+ADR 002's decision table gives 19 files the source "BDS packets", each marked "PR 3",
+and its Consequences say "#3, PR 3 decodes a capture and fills in every row marked
+PR 3". Those 19 come from eight packets: `StartGamePacket`, `ItemRegistryPacket`,
+`CreativeContentPacket`, `CraftingDataPacket`, `BiomeDefinitionListPacket`,
+`AvailableActorIdentifiersPacket`, `JigsawStructureDataPacket`, `VoxelShapesPacket`
+(`WANTED`, `tools/bds/tracer.js:25`).
 `tracer.js` speaks RakNet only, and `run.sh` forces `transport=raknet`, which BDS accepts
 while warning that logins need NetherNet. The steward's ruling on #3 (issuecomment
-6763815334) item 2 takes the tables over NetherNet, built inside #3, behind this ADR: it
+6763815334) item 2 takes the packets over NetherNet, built inside #3, behind this ADR: it
 is the first outside runtime dependency in `tools/`, and every later version run
 inherits it. The ADR pins the library and its licence, fetches it into the cache
 hash-verified before the run, and keeps RakNet as an option. Item 4 keeps the
@@ -23,6 +25,8 @@ scope ruling (6761625992) sets a throwaway `riftal_smoke_` container, `--rm`, `t
 nothing from Mojang committed. The steward's ruling on this ADR (issuecomment
 6782703312) accepts decision 7's network shape in place of `--network none`, and sets
 its conditions and the live run's proofs; with this ADR merged, it is the acceptance.
+The steward's issuecomment on PR #37's third round sets the fixture tests for those
+conditions.
 
 ## Sources
 
@@ -95,24 +99,29 @@ any, returns name, protocol and version.
    `scripts`, and declares exactly `werift: 0.27.0`. `tools/bds/package-lock.json` (npm
    lockfile v3, made with `--package-lock-only --ignore-scripts`) pins all 11 packages by
    `resolved` URL and sha512 `integrity`. A test fails on any `resolved` off
-   `https://registry.npmjs.org/`, any entry without sha512, any install script, or any
-   licence outside MIT, ISC, BSD-2-Clause, BSD-3-Clause, Apache-2.0 and MPL-2.0. No
-   tarball and no `node_modules` is committed, and nothing is unpacked into the tree, so
-   `.gitignore` carries no entry for them.
+   `https://registry.npmjs.org/`, any entry without sha512, any install script, any
+   entry with `os`, `cpu` or `optional`, or any licence outside MIT, ISC, BSD-2-Clause,
+   BSD-3-Clause, Apache-2.0 and MPL-2.0. No tarball and no `node_modules` is committed,
+   and nothing is unpacked into the tree, so `.gitignore` carries no entry for them. A
+   PR that ever needs a `.gitignore` change routes to the steward.
 3. **Fetch.** `record.js` downloads each locked tarball into `<cache>/npm/`, checks its
    sha512 and renames it into place only on a match, re-checking cached files on every
    run, as `nodeTarball` does. It never requires or unpacks them. `run.sh` takes
    `<cache>/npm` read-only, checks every hash again, unpacks with `tar` into its
-   `mktemp -d` tree at the lockfile's paths, and runs the tracer with `NODE_PATH` there.
-   No npm and no install script runs, so the dependency executes only inside the
-   throwaway container, never on the host.
+   `mktemp -d` tree at the lockfile's paths, fails on any `.node` file found there, and
+   runs the tracer with `NODE_PATH` there. No npm and no install script runs, so the
+   dependency executes only inside the throwaway container, never on the host.
 4. **Seam.** A transport is `{ open(onMessage, onClose), send(batch), close() }`, where a
    batch is the bytes after RakNet's `0xfe`. `encodeBatch` and `decodeBatch` carry no
    `0xfe` and handle compression, encryption and packets only.
-   - `tools/bds/raknet.js` holds `Session`, the frame codec, `0xfe` and the connection
-     control `trace()` holds at 7dca91d: the offline handshake (`0x05` to `0x08`),
-     `0x09`, `0x10` and `0x13`, ping `0x00`/`0x03` and `0x15`. It lands first, in its own
-     PR, with the same behaviour and tests.
+   - `tools/bds/raknet.js` holds `Session`, the frame codec and the connection control
+     `trace()` holds at 7dca91d: the offline handshake (`0x05` to `0x08`), `0x09`,
+     `0x10` and `0x13`, ping `0x00`/`0x03` and `0x15`. It lands first, in its own PR, as
+     a pure move with the same behaviour and tests, so `0xfe` stays in the batch codec
+     there.
+   - The NetherNet PR moves `0xfe` out of `encodeBatch` and `decodeBatch` into
+     `raknet.js`, and the batches `tools/bds/test/tracer.test.js:48-49` feed
+     `decodeBatch` lose their leading `0xfe`.
    - `tools/bds/nethernet.js` holds the HTTP signalling, the identity, the werift peer,
      segmenting and reassembly. It requires werift inside its factory, so every other
      tool and test loads without the dependency.
@@ -130,17 +139,26 @@ any, returns name, protocol and version.
    both directions a message is at most 255 segments, one below the 256 a u8
    remaining-segment count can express; a received message announcing more is an error.
 7. **Network shape, mandatory.** This shape replaces the scope ruling's `--network none`
-   for the run's container. Every other scope-ruling constraint stands.
+   for the run's container. Every other scope-ruling constraint stands. Fixture tests
+   drive `record.js` with a fake `--docker` command, which it already accepts
+   (`record.js:10`), and land in the NetherNet PR.
    - **Creation.** Per run, `record.js` creates `riftal_smoke_bds_net_<pid>` with
      `docker network create --internal -o
-     com.docker.network.bridge.gateway_mode_ipv4=isolated`, IPv4 only, no `--ipv6`.
+     com.docker.network.bridge.gateway_mode_ipv4=isolated`, IPv4 only, no `--ipv6`. A
+     fixture test asserts these exact `network create` arguments: `--internal`, the
+     isolated option, no `--ipv6`, and the name.
    - **Check before start.** `docker network inspect` must show `Internal` true,
      `EnableIPv6` false, the isolated option and an empty IPAM `Gateway`. If the engine
      rejects the option or any of these does not hold, `record.js` removes any network
      it created and exits non-zero without starting a container. There is no fallback
      shape: not the default gateway, the default bridge, `host` or a published port.
+     Fixture tests cover each of the four fields failing on its own, and the engine
+     rejecting the option; each asserts the network is removed, the exit is non-zero
+     and no `docker run` is ever issued.
    - **One container.** Only `riftal_smoke_bds_record_<pid>`, BDS with the tracer, is
-     ever on the network: no `-p`, no alias, and no second container joins it.
+     ever on the network: no `-p`, no alias, and no second container joins it. A
+     fixture test asserts no `-p` or `--publish`, no alias, no `network connect`, and
+     exactly one `run` on the network.
    - **Removal.** On every exit path, success, a non-zero exit, a failed check, a
      timeout and a signal, `record.js` removes the container by name and then the
      network. `--rm` is not enough: `timeout --kill-after` (`record.js:78`) can kill the
@@ -153,16 +171,21 @@ any, returns name, protocol and version.
    - **Candidates.** The tracer's offer carries one host candidate, the container's own
      non-loopback `eth0` address, read inside the container and never a value passed in
      from the host, plus end-of-candidates. werift runs with no STUN or TURN server and
-     mDNS off, so it offers no other candidate. BDS's checks reach the tracer as
-     peer-reflexive, so BDS's own candidates need no further signalling.
+     mDNS off, so it offers no other candidate. A unit test asserts the offer carries
+     exactly one host candidate, taken from an injected container interface list and
+     from no argument or environment value, with no STUN or TURN server and no mDNS.
+     BDS's answer carries no `a=candidate`, so BDS's side is the remote candidates
+     werift learns, peer-reflexive from BDS's checks included, plus any BDS trickles.
+     P4 reports them.
    - **LAN visibility.** `enable-lan-visibility=false` stays asserted by `run.sh`'s key
-     check.
+     check, which needs no new test.
 
 ## Why
 
 - **werift over node-datachannel.** Pure JS on the pinned Node, no native binary built
-  elsewhere, no end-of-life OpenSSL, and an existing NetherNet client (PrismarineJS) is
-  built on it. node-datachannel's speed does not matter in a six-minute run.
+  elsewhere, which the lockfile test and `run.sh`'s `.node` check hold, no end-of-life
+  OpenSSL, and an existing NetherNet client (PrismarineJS) is built on it.
+  node-datachannel's speed does not matter in a six-minute run.
 - **A lockfile we fetch from, not npm.** npm's lockfile is the standard, reviewable form
   of an integrity pin. Our own fetcher keeps install scripts and registry resolution
   out of the run, and puts the hash check where `record.js` already checks Node.
@@ -221,9 +244,11 @@ any, returns name, protocol and version.
     after `Server started.` and again after the session, `eth0` at `disable_ipv6=1`, a
     connection to an outside address failing, and an outside name resolving to no
     address.
-  - P4. BDS's own trickled ICE candidates, by type and address class only, for example
-    "host, container eth0", showing none is loopback or a host address, which settles
-    finding 3; beside them the tracer's offer carrying only the `eth0` host candidate.
+  - P4. Every BDS-side candidate the session uses, by type and address class only, for
+    example "prflx, container eth0": the remote candidates werift learns, peer-reflexive
+    included, plus any BDS trickles. It shows none is loopback or a host address, which
+    settles finding 3; beside them the tracer's offer carrying only the `eth0` host
+    candidate.
   - P5. After exit, no `riftal_smoke_bds_*` container in `docker ps -a` and no
     `riftal_smoke_bds_net_<pid>` in `docker network ls`, shown after the session and
     again after a run that ends at the timeout.
@@ -246,6 +271,8 @@ any, returns name, protocol and version.
 - **The NetherNet PR** corrects the comments that describe a loopback-only container
   joined on 127.0.0.1 over RakNet, at `tools/bds/record.js:4-7`, `tools/bds/run.sh:2`
   and `tools/bds/tracer.js:4-5`, and the RakNet-only comment at `tools/bds/run.sh:17-19`.
+  It inverts the `--network none` assertion at `tools/bds/test/record.test.js:21-22`:
+  the container is on `riftal_smoke_bds_net_<pid>` and on no other network.
 - **Every version run** fetches the same 11 pinned tarballs into the cache and needs an
   engine with isolated gateway mode; on one without it the run refuses, and the dummy
   interface needs an amendment. Bumping werift is its own PR with a new lockfile and

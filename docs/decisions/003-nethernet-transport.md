@@ -45,16 +45,18 @@ Spike 2026-11-10 on #3, BDS Linux 1.26.63.1, WSL docker engine.
 
 1. **Sockets.** The shipped `server.properties` has `transport=nethernet`. After
    `Server started.` BDS holds only `tcp6 :::19132 LISTEN` and `udp6 :::7551`.
-2. **Signalling is plain HTTP on TCP `server-port`.** In the spike, `GET /v1/join` gave
-   name, protocol 2225 and version. In the steward's reproduction a plain `GET /v1/join`
-   returned an empty JSON body, so that part did not reproduce. `POST /v1/join/1` takes
-   an SDP offer: without `a=identity` it answers `37` (identity not allowed), which did
-   reproduce; with a self-signed ES384 identity it answers `application/sdp` with
-   setup:active, sctp-port 5000, ice trickle, no `a=candidate`, no max-message-size. No
-   Xbox Live is needed under `online-mode=false`.
-3. **Blocker, unverified.** Under `--network none` ICE never connected: with loopback its
+2. **Signalling is plain HTTP on TCP `server-port`.** `GET /v1/join` returns an empty
+   body with `enable-lan-visibility=false`, and name, protocol and version with it
+   `true`, in the spike, the steward's reproduction and the live runs of finding 7. It is
+   diagnostic only. `POST /v1/join/1` takes an SDP offer: without `a=identity` it
+   answers `37` (identity not allowed), which did reproduce; with a self-signed ES384
+   identity it answers `application/sdp` with setup:active, sctp-port 5000, ice
+   trickle, no max-message-size, and under `--network none` no `a=candidate`. No Xbox
+   Live is needed under `online-mode=false`.
+3. **No candidate under `--network none`.** ICE never connected there: with loopback its
    only interface, BDS gathered no candidate and opened no UDP socket, whatever
-   `server-ip` and `server-udp-ports` said. The live run's P4 proves or refutes it.
+   `server-ip` and `server-udp-ports` said. On the isolated network BDS answers with a
+   host candidate on `eth0` and ICE connects (finding 7).
 4. **Framing.** Channels `ReliableDataChannel` and `UnreliableDataChannel`. A reliable
    message is a u8 remaining-segment count plus a fragment, joined until 0. The payload
    is the game batch without RakNet's `0xfe`. BDS's WebRTC is libwebrtc (dcsctp).
@@ -83,11 +85,41 @@ Spike 2026-11-10 on #3, BDS Linux 1.26.63.1, WSL docker engine.
      network reaches `Server started.` in both. Under the isolated network it holds
      finding 1's two sockets plus Docker's embedded DNS on `127.0.0.11`, and
      `example.com` and `github.com` resolve to no address.
+7. **Live runs**, PRs #41, #44 and #45 and an independent QA live run, BDS Linux
+   1.26.63.1, on the isolated network.
+   - **Candidates.** BDS's answer carries one host candidate, on the container's
+     `eth0`, and none on loopback or a host address. It trickles none, since HTTP
+     signalling gives it no way to. P4 passed in every run.
+   - **Identity.** BDS checks it: an offer with a forged fingerprint signature gets code
+     37 and no answer, and the real one gets an SDP answer.
+   - **DTLS and SCTP.** werift 0.27.0 opens `ReliableDataChannel` and
+     `UnreliableDataChannel` with BDS's libwebrtc.
+   - **Segments.** A login of about 22.5 kB, sent as 3 segments of at most 10000 bytes,
+     is accepted, and BDS goes on to `StartGamePacket` with no disconnect.
+   - **No `0xfe`.** BDS's first message starts `0x0c`, the length prefix of the 12-byte
+     `NetworkSettingsPacket`.
+   - **No Bedrock cipher over NetherNet.** BDS sends `ServerToClientHandshakePacket`,
+     and neither side encrypts after it: the batches that follow decode plain, and a
+     client that starts the cipher gets nothing more from BDS. Over RakNet both sides
+     encrypt after the handshake.
+   - **DeviceOS.** A self-signed login whose client data carries `DeviceOS` 7
+     (Windows 10) is refused with "Connection Request invalid. readNoHeader failed!
+     packetId: 1", over RakNet and NetherNet alike. 1, 8, 9, 12 and 15 are accepted.
+   - **Capture.** `capture.bin` holds all eight `WANTED` packets, 124 to 142 records per
+     run, and the tracer exits 0.
+   - **Signalling log line.** BDS logs "Signed in to signaling service successfully"
+     about 0.1 s before `Server started.`
 
-Unknown: whether BDS gathers a candidate on the isolated network, whether it checks the
-identity, werift against libwebrtc's DTLS and SCTP, the segment size BDS accepts, the
-absence of `0xfe`, whether Bedrock encryption runs over NetherNet, and which request, if
-any, returns name, protocol and version.
+Finding 7 settles candidate gathering on the isolated network, the identity check,
+werift against libwebrtc's DTLS and SCTP, the segment size, the absence of `0xfe` and
+encryption over NetherNet. Finding 2 settles which request returns name, protocol and
+version.
+
+Unknown: what BDS means by "Signed in to signaling service successfully". It is not an
+outside connection: P3's egress and name checks fail, the network check before start
+holds, and the socket dumps show no non-local peer. An outside peer in a socket dump, or
+an outside connect or name resolution succeeding in P3, sends the run back to the
+steward.
 
 ## Decision
 
@@ -111,9 +143,14 @@ any, returns name, protocol and version.
    `mktemp -d` tree at the lockfile's paths, fails on any `.node` file found there, and
    runs the tracer with `NODE_PATH` there. No npm and no install script runs, so the
    dependency executes only inside the throwaway container, never on the host.
-4. **Seam.** A transport is `{ open(onMessage, onClose), send(batch), close() }`, where a
-   batch is the bytes after RakNet's `0xfe`. `encodeBatch` and `decodeBatch` carry no
-   `0xfe` and handle compression, encryption and packets only.
+4. **Seam.** A transport is `{ open(onMessage, onClose), send(batch), close(),
+   bedrockCipher }`, where a batch is the bytes after RakNet's `0xfe`. `open` resolves
+   once batches can be sent. A throw from `onMessage` ends the connection and goes to
+   `onClose`; `onClose` is called at most once, and no batch reaches `onMessage` after
+   it. `bedrockCipher` is true where both sides encrypt batches after the handshake, as
+   over RakNet, and false over NetherNet (finding 7); `trace()` starts the cipher only
+   where it is true. `encodeBatch` and `decodeBatch` carry no `0xfe` and handle
+   compression, encryption and packets only.
    - `tools/bds/raknet.js` holds `Session`, the frame codec and the connection control
      `trace()` holds at 7dca91d: the offline handshake (`0x05` to `0x08`), `0x09`,
      `0x10` and `0x13`, ping `0x00`/`0x03` and `0x15`. It lands first, in its own PR, as
@@ -132,7 +169,10 @@ any, returns name, protocol and version.
    for the login, so the identity's `cpk` and the login's agree: a token `{cpk, iat,
    exp}` with an `x5u` header, plus a detached JWS over `{"fingerprint":[...]}` carrying
    werift's DTLS certificate fingerprint, in go-nethernet's `identity.go` layout. The key
-   lives in memory only. No Xbox Live, no stored key.
+   lives in memory only. No Xbox Live, no stored key. The login's client data carries
+   `DeviceOS` 15, Linux (`DEVICE_OS`, `tools/bds/tracer.js`), on both transports, since
+   BDS 1.26.63.1 refuses 7 on a self-signed login (finding 7). The accepted values are
+   BDS's, so each version run re-checks that the login is accepted with it.
 6. **Framing.** Sends go on `ReliableDataChannel` in 10000-byte segments, below SCTP's
    65536-byte default for an answer without max-message-size. Receives come from both
    channels, and reliable ones are joined by count whatever segment size BDS uses. In
@@ -174,9 +214,9 @@ any, returns name, protocol and version.
      mDNS off, so it offers no other candidate. A unit test asserts the offer carries
      exactly one host candidate, taken from an injected container interface list and
      from no argument or environment value, with no STUN or TURN server and no mDNS.
-     BDS's answer carries no `a=candidate`, so BDS's side is the remote candidates
-     werift learns, peer-reflexive from BDS's checks included, plus any BDS trickles.
-     P4 reports them.
+     On the isolated network BDS's answer carries one host candidate on its `eth0`
+     (finding 7), and BDS's side is that plus the remote candidates werift learns,
+     peer-reflexive from BDS's checks included. P4 reports them.
    - **LAN visibility.** `enable-lan-visibility=false` stays asserted by `run.sh`'s key
      check, which needs no new test.
 
@@ -190,17 +230,19 @@ any, returns name, protocol and version.
   of an integrity pin. Our own fetcher keeps install scripts and registry resolution
   out of the run, and puts the hash check where `record.js` already checks Node.
 - **The seam at the batch.** Both transports deliver a whole batch. Below that, RakNet
-  and NetherNet share nothing, and above it, Bedrock's login, compression and encryption
-  are the same, so the game layer is written once.
-- **An internal network, in isolated mode only.** If finding 3 holds, BDS needs one
+  and NetherNet share nothing, and above it Bedrock's login, compression and handshake
+  are the same, so the game layer is written once. Whether the cipher runs after the
+  handshake is the one difference above the seam (finding 7), and `bedrockCipher`
+  carries it as a flag rather than a second game layer.
+- **An internal network, in isolated mode only.** By finding 3, BDS needs one
   non-loopback interface, and an internal network gives it one for the run only. The
   default gateway is why isolated mode is mandatory: the host holds an address on the
   bridge and reached BDS's port (finding 6), which with `online-mode=false` is an
   unauthenticated server on a host interface. In isolated mode the host holds no address
   or route, egress fails and no other container reaches it, so BDS is reachable from
   nothing but its own container, and with no `-p` and no host address it is not a
-  publication under riftal-pm#491. It is the steward-accepted shape (6782703312) but
-  untested against BDS's ICE, so the check before start and the live run hold it there.
+  publication under riftal-pm#491. It is the steward-accepted shape (6782703312), ICE
+  connects over it (finding 7), and the check before start holds it there.
 - **One candidate, our own address.** STUN, TURN and mDNS would each send traffic or
   advertise an address beyond the container, and BDS needs none of them on one bridge.
   An address read inside the container cannot be a host address handed in by mistake.
@@ -240,10 +282,10 @@ any, returns name, protocol and version.
     id>` prints no `inet` or `inet6` line, `ip route show dev br-...` and
     `ip -6 route show dev br-...` print nothing, and a host TCP connect to
     `<container ip>:19132` fails.
-  - P3. Inside the container: the local sockets of `/proc/net/{tcp,tcp6,udp,udp6}`
-    after `Server started.` and again after the session, `eth0` at `disable_ipv6=1`, a
-    connection to an outside address failing, and an outside name resolving to no
-    address.
+  - P3. Inside the container: the local and remote addresses of every socket in
+    `/proc/net/{tcp,tcp6,udp,udp6}` after `Server started.` and again after the session,
+    `eth0` at `disable_ipv6=1`, a connection to an outside address failing, and an
+    outside name resolving to no address.
   - P4. Every BDS-side candidate the session uses, by type and address class only, for
     example "prflx, container eth0": the remote candidates werift learns, peer-reflexive
     included, plus any BDS trickles. It shows none is loopback or a host address, which
@@ -264,10 +306,15 @@ any, returns name, protocol and version.
      disconnect, which fixes the segment size BDS accepts.
   6. The first message from BDS is logged by its first byte, and `NetworkSettingsPacket`
      decodes with no `0xfe`.
-  7. The capture shows whether `ServerToClientHandshakePacket` arrived, and so whether
-     encryption runs over NetherNet.
+  7. `ServerToClientHandshakePacket` arrives, and the packets after it decode with
+     `bedrockCipher` false.
   8. `capture.bin` holds the eight `WANTED` packets and the tracer exits 0. The capture
      stays in the cache.
+- **P3 is emitted by `run.sh` itself**, inside the container, after `Server started.`
+  It fails closed: `eth0` with IPv6 on, an outside connect succeeding or an outside name
+  resolving stops BDS and exits 1 before the tracer starts (`refuse()`). Its socket
+  dumps carry each socket's remote address beside its local one, so a non-local peer
+  shows in the run's own output.
 - **The NetherNet PR** corrects the comments that describe a loopback-only container
   joined on 127.0.0.1 over RakNet, at `tools/bds/record.js:4-7`, `tools/bds/run.sh:2`
   and `tools/bds/tracer.js:4-5`, and the RakNet-only comment at `tools/bds/run.sh:17-19`.
@@ -276,6 +323,8 @@ any, returns name, protocol and version.
 - **Every version run** fetches the same 11 pinned tarballs into the cache and needs an
   engine with isolated gateway mode; on one without it the run refuses, and the dummy
   interface needs an amendment. Bumping werift is its own PR with a new lockfile and
-  this live run again.
+  this live run again. It re-checks that BDS accepts the login's `DeviceOS` and that
+  the batches after `ServerToClientHandshakePacket` decode with `bedrockCipher` false.
 - **Revisit** if any of P1 to P5 fails, if BDS gathers a candidate on loopback, which
-  returns the run to `--network none`, or if a later BDS drops HTTP signalling.
+  returns the run to `--network none`, if a later BDS drops HTTP signalling, or if an
+  outside peer shows in a P3 socket dump.

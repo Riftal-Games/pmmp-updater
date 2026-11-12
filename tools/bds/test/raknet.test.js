@@ -67,6 +67,7 @@ test('the transport connects, answers a ping, carries batches both ways behind 0
 	assert.deepEqual(got, [Buffer.from([0x61])]);
 	assert.deepEqual(seen, [0x09, 0x13, 0x03, 0xfe, 0x62]);
 	assert.deepEqual(closed, ['the server closed the RakNet connection']);
+	assert.equal(link.bedrockCipher, true);
 });
 
 // trace() learns of a bad packet only through onClose, so a throw from onMessage must end

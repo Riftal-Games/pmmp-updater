@@ -93,7 +93,8 @@ class Session {
 // resolves once batches can be sent. onClose is called at most once, with the error that
 // ends the connection, and no batch reaches onMessage after it. An exception thrown by
 // onMessage ends the connection and is passed to onClose. close() releases the connection
-// and may be called again.
+// and may be called again. bedrockCipher is true where both sides encrypt batches once
+// the handshake is done, as they do over RakNet.
 function transport(port) {
 	const socket = dgram.createSocket('udp4');
 	const guid = crypto.randomBytes(8);
@@ -103,6 +104,7 @@ function transport(port) {
 	let bound = false;
 	let ended = false;
 	return {
+		bedrockCipher: true,
 		open(onMessage, onClose) {
 			const end = (e) => {
 				if (!ended) onClose(e);

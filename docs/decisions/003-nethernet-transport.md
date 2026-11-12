@@ -46,8 +46,11 @@ Spike 2026-11-10 on #3, BDS Linux 1.26.63.1, WSL docker engine.
 1. **Sockets.** The shipped `server.properties` has `transport=nethernet`. After
    `Server started.` BDS holds only `tcp6 :::19132 LISTEN` and `udp6 :::7551`.
 2. **Signalling is plain HTTP on TCP `server-port`.** `GET /v1/join` returns an empty
-   body with `enable-lan-visibility=false`, and name, protocol and version with it
-   `true`, in the spike, the steward's reproduction and the live runs of finding 7. It is
+   body with `enable-lan-visibility=false` in the steward's reproduction and the live
+   runs of finding 7. One diagnostic run with it `true`, recorded in the body of closed
+   PR #42 and not that branch's setting, returned name, protocol 2225 and version
+   1.26.63. The spike's GET returned name, protocol 2225 and version, its setting
+   unrecorded. The tracer takes the protocol from `packages/` either way, so the body is
    diagnostic only. `POST /v1/join/1` takes an SDP offer: without `a=identity` it
    answers `37` (identity not allowed), which did reproduce; with a self-signed ES384
    identity it answers `application/sdp` with setup:active, sctp-port 5000, ice
@@ -102,9 +105,11 @@ Spike 2026-11-10 on #3, BDS Linux 1.26.63.1, WSL docker engine.
      and neither side encrypts after it: the batches that follow decode plain, and a
      client that starts the cipher gets nothing more from BDS. Over RakNet both sides
      encrypt after the handshake.
-   - **DeviceOS.** A self-signed login whose client data carries `DeviceOS` 7
-     (Windows 10) is refused with "Connection Request invalid. readNoHeader failed!
-     packetId: 1", over RakNet and NetherNet alike. 1, 8, 9, 12 and 15 are accepted.
+   - **DeviceOS.** Over NetherNet (#44), a self-signed login whose client data carries
+     `DeviceOS` 7 (Windows 10) is refused with "Connection Request invalid. readNoHeader
+     failed! packetId: 1", and 1, 8, 9, 12 and 15 are accepted. BDS 1.26.63.1 refuses
+     every RakNet login at the transport, so a RakNet refusal on it is the transport's,
+     and no other `DeviceOS` was sent to it over RakNet.
    - **Capture.** `capture.bin` holds all eight `WANTED` packets, 124 to 142 records per
      run, and the tracer exits 0.
    - **Signalling log line.** BDS logs "Signed in to signaling service successfully"
@@ -112,8 +117,8 @@ Spike 2026-11-10 on #3, BDS Linux 1.26.63.1, WSL docker engine.
 
 Finding 7 settles candidate gathering on the isolated network, the identity check,
 werift against libwebrtc's DTLS and SCTP, the segment size, the absence of `0xfe` and
-encryption over NetherNet. Finding 2 settles which request returns name, protocol and
-version.
+encryption over NetherNet. Finding 2 has one diagnostic run as its only record of what
+`GET /v1/join` returns with `enable-lan-visibility=true`.
 
 Unknown: what BDS means by "Signed in to signaling service successfully". It is not an
 outside connection: P3's egress and name checks fail, the network check before start

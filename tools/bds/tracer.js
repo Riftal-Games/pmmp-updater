@@ -20,6 +20,9 @@ const nethernet = require('./nethernet');
 const raknet = require('./raknet');
 
 const NAME = 'PmmpUpdater';
+// BDS 1.26.63.1 refuses a self-signed login whose client data names Windows 10 (DeviceOS
+// 7) as "Connection Request invalid", and accepts Linux, which the tracer runs on.
+const DEVICE_OS = 15;
 // Every packet ADR 002 sources a BedrockData file from. The session ends once all arrived.
 const WANTED = ['StartGamePacket', 'ItemRegistryPacket', 'CreativeContentPacket', 'CraftingDataPacket', 'BiomeDefinitionListPacket', 'AvailableActorIdentifiersPacket', 'JigsawStructureDataPacket', 'VoxelShapesPacket'];
 
@@ -117,7 +120,7 @@ function loginPacket(ids, info, keys, port) {
 	const v = info.version;
 	const data = jwt({
 		AnimatedImageData: [], ArmSize: 'wide', CapeData: '', CapeId: '', CapeImageHeight: 0, CapeImageWidth: 0, CapeOnClassicSkin: false, ClientEditorConnectionIntent: 0, ClientIsEditorCapable: false, ClientRandomId: crypto.randomInt(2 ** 47),
-		CompatibleWithClientSideChunkGen: false, CurrentInputMode: 1, DefaultInputMode: 1, DeviceId: uuid, DeviceModel: 'pmmp-updater', DeviceOS: 7, FilterProfanity: false, GameVersion: `${v.major}.${v.minor}.${v.patch}`, GraphicsMode: 1, GuiScale: 0,
+		CompatibleWithClientSideChunkGen: false, CurrentInputMode: 1, DefaultInputMode: 1, DeviceId: uuid, DeviceModel: 'pmmp-updater', DeviceOS: DEVICE_OS, FilterProfanity: false, GameVersion: `${v.major}.${v.minor}.${v.patch}`, GraphicsMode: 1, GuiScale: 0,
 		LanguageCode: 'en_US', MaxViewDistance: 8, MemoryTier: 0, OverrideSkin: false, PartyId: '', IsPartyLeader: false, PlatformUserId: '', PersonaPieces: [], PersonaSkin: false, PieceTintColors: [], PlatformOfflineId: '', PlatformOnlineId: '', PlatformType: 0, PremiumSkin: false, ProfileHash: '', SelfSignedId: uuid,
 		ServerAddress: `127.0.0.1:${port}`, SkinAnimationData: '', SkinColor: '#0', SkinData: skin, SkinGeometryData: Buffer.from(JSON.stringify({ format_version: '1.12.0', 'minecraft:geometry': [{ description: { identifier: 'geometry.humanoid.custom', texture_width: 64, texture_height: 64 }, bones: [] }] })).toString('base64'), SkinGeometryDataEngineVersion: Buffer.from('1.14.0').toString('base64'), SkinId: NAME, SkinImageHeight: 64, SkinImageWidth: 64,
 		SkinResourcePatch: Buffer.from(JSON.stringify({ geometry: { default: 'geometry.humanoid.custom' } })).toString('base64'), ThirdPartyName: NAME, TrustedSkin: false, UIProfile: 0,
@@ -150,14 +153,14 @@ function parseArgs(args) {
 	return a;
 }
 
-function trace(a, log) {
+function trace(a, log, transport) {
 	const info = JSON.parse(fs.readFileSync(a.protocol_info, 'utf8'));
 	const ids = info.packets;
 	const names = new Map(Object.entries(ids).map(([n, id]) => [id, n]));
 	const keys = makeKeys();
 	const state = { compressed: false, cipher: null };
 	const records = [];
-	const link = a.transport === 'raknet' ? raknet.transport(a.port) : nethernet.transport({ port: a.port, info, keys, log });
+	const link = transport || (a.transport === 'raknet' ? raknet.transport(a.port) : nethernet.transport({ port: a.port, info, keys, log }));
 	return new Promise((resolve) => {
 		let done = false;
 		const finish = (error) => {
@@ -181,7 +184,8 @@ function trace(a, log) {
 				game(loginPacket(ids, info, keys, a.port));
 			} else if (id === ids.ServerToClientHandshakePacket) {
 				const [length, at] = readVarint(payload, 0);
-				state.cipher = new Cipher(sessionKey(payload.subarray(at, at + length).toString(), keys.privateKey));
+				const key = sessionKey(payload.subarray(at, at + length).toString(), keys.privateKey);
+				if (link.bedrockCipher) state.cipher = new Cipher(key);
 				game(varint(ids.ClientToServerHandshakePacket));
 			} else if (id === ids.PlayStatusPacket && ![0, 3].includes(payload.readUInt32BE(0))) {
 				throw new Error(`PlayStatus ${payload.readUInt32BE(0)}`);
@@ -201,4 +205,4 @@ function trace(a, log) {
 
 if (require.main === module) trace(parseArgs(process.argv.slice(2)), (s) => process.stdout.write(`${s}\n`)).then((code) => { process.exitCode = code; });
 
-module.exports = { WANTED, varint, readVarint, Cipher, encodeBatch, decodeBatch, makeKeys, jwt, loginPacket, sessionKey, encodeCapture, parseArgs };
+module.exports = { WANTED, varint, readVarint, Cipher, encodeBatch, decodeBatch, makeKeys, jwt, loginPacket, sessionKey, encodeCapture, parseArgs, trace };

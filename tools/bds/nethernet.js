@@ -91,6 +91,7 @@ function offer(sdp, address, keys, signer) {
 const addressClass = (a, own) => (a === own ? 'container eth0' : /^(127\.|::1$|::ffff:127\.)/.test(a) ? 'loopback' : /^(fe80|169\.254\.)/i.test(a) ? 'link-local' : /\.local$/.test(a) ? 'mDNS name' : 'other');
 
 // The transport raknet.js states, with each batch whole on the data channels and no 0xfe.
+// DTLS encrypts the channels, and BDS does not run Bedrock's cipher over them.
 function transport({ port, info, keys, log, interfaces = os.networkInterfaces(), get = fetch, werift = () => require('werift') }) {
 	const base = `http://127.0.0.1:${port}/v1/join`;
 	const id = () => crypto.randomBytes(8).readBigUInt64BE().toString();
@@ -156,6 +157,7 @@ function transport({ port, info, keys, log, interfaces = os.networkInterfaces(),
 		reliable = channels[0];
 	};
 	return {
+		bedrockCipher: false,
 		open,
 		send(batch) {
 			const parts = segments(batch);

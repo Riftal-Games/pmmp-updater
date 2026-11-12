@@ -95,6 +95,7 @@ test('the transport offers only eth0, learns whether BDS checks the identity, an
 	assert.ok(!peers[1].remote.sdp.includes('bds.local'));
 	assert.ok(logs.includes('nethernet: a forged fingerprint signature gets no answer, code 37'));
 	assert.ok(logs.some((l) => l.endsWith('remote candidates [prflx, container eth0], 1 mDNS dropped')));
+	assert.equal(link.bedrockCipher, false);
 });
 
 test('batches go out segmented on the reliable channel, come in from both, and onClose fires once', async () => {

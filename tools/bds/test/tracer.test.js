@@ -25,8 +25,9 @@ test('a batch survives compression and encryption in order, and a flipped byte f
 	const bad = t.encodeBatch(packets, client);
 	bad[3] ^= 1;
 	assert.throws(() => t.decodeBatch(bad, server), /checksum/);
-	assert.throws(() => t.decodeBatch(Buffer.from([0xfe, 0x01, 0]), { compressed: true }), /neither zlib nor none/);
-	assert.throws(() => t.decodeBatch(Buffer.from([0xfe, 5, 1]), {}), /past the end of its batch/);
+	assert.throws(() => t.decodeBatch(Buffer.from([0x01, 0]), { compressed: true }), /neither zlib nor none/);
+	assert.throws(() => t.decodeBatch(Buffer.from([5, 1]), {}), /past the end of its batch/);
+	assert.deepEqual(t.encodeBatch([Buffer.from([0xfe])], {}), Buffer.from([1, 0xfe]));
 });
 
 test('the session key is the shared secret salted, and a handshake signed by another key fails', () => {

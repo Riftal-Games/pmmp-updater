@@ -88,9 +88,12 @@ class Session {
 	}
 }
 
-// A transport is { open(onMessage, onClose), send(batch), close() }. open resolves once
-// the server accepts the connection. onMessage gets each game batch, 0xfe included, and
-// onClose gets the error that ends the connection, including one onMessage throws.
+// A transport is { open(onMessage, onClose), send(batch), close() }, where a batch is the
+// game layer's bytes; RakNet carries it behind 0xfe, which this one adds and strips. open
+// resolves once batches can be sent. onClose is called at most once, with the error that
+// ends the connection, and no batch reaches onMessage after it. An exception thrown by
+// onMessage ends the connection and is passed to onClose. close() releases the connection
+// and may be called again.
 function transport(port) {
 	const socket = dgram.createSocket('udp4');
 	const guid = crypto.randomBytes(8);
@@ -98,8 +101,13 @@ function transport(port) {
 	let session = null;
 	let knock = null;
 	let bound = false;
+	let ended = false;
 	return {
 		open(onMessage, onClose) {
+			const end = (e) => {
+				if (!ended) onClose(e);
+				ended = true;
+			};
 			return new Promise((resolve) => {
 				session = new Session(raw, (m) => {
 					try {
@@ -108,9 +116,9 @@ function transport(port) {
 							resolve();
 						} else if (m[0] === 0x00) session.send(Buffer.concat([Buffer.from([0x03]), m.subarray(1, 9), Buffer.alloc(8)]));
 						else if (m[0] === 0x15) throw new Error('the server closed the RakNet connection');
-						else if (m[0] === 0xfe) onMessage(m);
+						else if (m[0] === 0xfe && !ended) onMessage(m.subarray(1));
 					} catch (e) {
-						onClose(e);
+						end(e);
 					}
 				});
 				socket.on('message', (b) => {
@@ -121,7 +129,7 @@ function transport(port) {
 						clearInterval(knock);
 						session.send(Buffer.concat([Buffer.from([0x09]), guid, Buffer.alloc(8), Buffer.from([0])]));
 					} else if (b[0] & 0x80) {
-						try { session.receive(b); } catch (e) { onClose(e); }
+						try { session.receive(b); } catch (e) { end(e); }
 					}
 				});
 				knock = setInterval(() => raw(Buffer.concat([Buffer.from([0x05]), MAGIC, Buffer.from([11]), Buffer.alloc(MTU - 46)])), 500);
@@ -129,8 +137,9 @@ function transport(port) {
 				bound = true;
 			});
 		},
-		send(batch) { session.send(batch); },
+		send(batch) { session.send(Buffer.concat([Buffer.from([0xfe]), batch])); },
 		close() {
+			ended = true;
 			if (!bound) return;
 			bound = false;
 			clearInterval(knock);

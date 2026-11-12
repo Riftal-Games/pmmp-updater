@@ -27,8 +27,9 @@ test('split, shuffled and repeated datagrams reach the peer once each, in order'
 });
 
 // A server on loopback that walks the transport through the offline handshake and the
-// connection request, then pings it, sends a batch, takes one back and disconnects it.
-test('the transport connects, answers a ping, carries batches both ways and reports a disconnect', { timeout: 10000 }, async (t) => {
+// connection request, then pings it, sends a batch, takes one back and disconnects it twice,
+// with one more batch after.
+test('the transport connects, answers a ping, carries batches both ways behind 0xfe and reports one disconnect', { timeout: 10000 }, async (t) => {
 	const server = dgram.createSocket('udp4');
 	t.after(() => server.close());
 	const seen = [];
@@ -41,7 +42,10 @@ test('the transport connects, answers a ping, carries batches both ways and repo
 			seen.push(m[0]);
 			if (m[0] === 0x09) session.send(Buffer.from([0x10]));
 			else if (m[0] === 0x03) replied(m.subarray(1, 9));
-			else if (m[0] === 0xfe) session.send(Buffer.from([0x15]));
+			else if (m[0] === 0xfe) {
+				seen.push(m[1]);
+				for (const d of [[0x15], [0x15], [0xfe, 0x63]]) session.send(Buffer.from(d));
+			}
 		});
 		if (b[0] === 0x05) reply(Buffer.concat([Buffer.from([0x06]), r.MAGIC, Buffer.alloc(8), Buffer.from([0, 0x05, 0x78])]));
 		else if (b[0] === 0x07) reply(Buffer.from([0x08]));
@@ -57,9 +61,44 @@ test('the transport connects, answers a ping, carries batches both ways and repo
 	}));
 	assert.deepEqual(await pong, Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]));
 	await new Promise((resolve) => { const wait = setInterval(() => got.length && resolve(clearInterval(wait)), 10); });
-	link.send(Buffer.from([0xfe, 0x62]));
+	link.send(Buffer.from([0x62]));
 	await ended;
-	assert.deepEqual(got, [Buffer.from([0xfe, 0x61])]);
-	assert.deepEqual(seen, [0x09, 0x13, 0x03, 0xfe]);
+	await new Promise((resolve) => setTimeout(resolve, 200));
+	assert.deepEqual(got, [Buffer.from([0x61])]);
+	assert.deepEqual(seen, [0x09, 0x13, 0x03, 0xfe, 0x62]);
 	assert.deepEqual(closed, ['the server closed the RakNet connection']);
+});
+
+// trace() learns of a bad packet only through onClose, so a throw from onMessage must end
+// the connection there, once, and stop every later batch.
+test('a throw from onMessage reaches onClose once and no batch follows it', { timeout: 10000 }, async (t) => {
+	const server = dgram.createSocket('udp4');
+	t.after(() => server.close());
+	let session = null;
+	server.on('message', (b, from) => {
+		const reply = (d) => server.send(d, from.port, from.address);
+		session ||= new r.Session(reply, (m) => {
+			if (m[0] === 0x09) session.send(Buffer.from([0x10]));
+			else if (m[0] === 0x13) for (const d of [[0xfe, 0x61], [0xfe, 0x62], [0x15]]) session.send(Buffer.from(d));
+		});
+		if (b[0] === 0x05) reply(Buffer.concat([Buffer.from([0x06]), r.MAGIC, Buffer.alloc(8), Buffer.from([0, 0x05, 0x78])]));
+		else if (b[0] === 0x07) reply(Buffer.from([0x08]));
+		else if (b[0] & 0x80) session.receive(b);
+	});
+	await new Promise((resolve) => server.bind(0, '127.0.0.1', resolve));
+	const link = r.transport(server.address().port);
+	t.after(() => link.close());
+	const boom = new Error('bad packet');
+	const [got, closed] = [[], []];
+	const ended = new Promise((resolve) => link.open((m) => {
+		got.push(m);
+		throw boom;
+	}, (e) => resolve(closed.push(e))));
+	await ended;
+	await new Promise((resolve) => setTimeout(resolve, 200));
+	assert.deepEqual(got, [Buffer.from([0x61])]);
+	assert.equal(closed.length, 1);
+	assert.equal(closed[0], boom);
+	link.close();
+	assert.doesNotThrow(() => link.close());
 });

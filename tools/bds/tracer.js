@@ -65,18 +65,16 @@ class Cipher {
 	}
 }
 
-// A game batch is 0xfe, then, once NetworkSettings has arrived, a compression byte, then
-// length-prefixed packets. Once the handshake is done, all of it after 0xfe is encrypted.
+// A game batch is, once NetworkSettings has arrived, a compression byte, then
+// length-prefixed packets. Once the handshake is done, all of it is encrypted.
 function encodeBatch(packets, state) {
 	let body = Buffer.concat(packets.flatMap((p) => [varint(p.length), p]));
 	if (state.compressed) body = Buffer.concat([Buffer.from([0]), zlib.deflateRawSync(body)]);
-	if (state.cipher) body = state.cipher.encrypt(body);
-	return Buffer.concat([Buffer.from([0xfe]), body]);
+	return state.cipher ? state.cipher.encrypt(body) : body;
 }
 
 function decodeBatch(message, state) {
-	if (message[0] !== 0xfe) throw new Error(`not a game batch: 0x${message[0].toString(16)}`);
-	let body = message.subarray(1);
+	let body = message;
 	if (state.cipher) body = state.cipher.decrypt(body);
 	if (state.compressed && body[0] === 0) body = zlib.inflateRawSync(body.subarray(1), { maxOutputLength: 256 << 20 });
 	else if (state.compressed && body[0] === 0xff) body = body.subarray(1);

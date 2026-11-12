@@ -3,6 +3,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const t = require('../tracer');
 
 // A made-up protocol, so nothing here depends on a real version's numbers.
@@ -55,7 +58,46 @@ test('the login carries the protocol from protocol_info and a token and client d
 	assert.ok(verifies(auth.Token) && verifies(data));
 	assert.deepEqual([part(auth.Token, 1).cpk, part(auth.Token, 1).aud], [keys.der, 'api://auth-minecraft-services/multiplayer']);
 	assert.equal(part(data, 1).GameVersion, '9.8.7');
+	assert.equal(part(data, 1).DeviceOS, 15);
 });
+
+// A server stood in for over a fake transport answers each step of the join, then sends
+// the WANTED packets, encrypted only where the transport says Bedrock's cipher runs.
+for (const bedrockCipher of [false, true]) {
+	test(`with bedrockCipher ${bedrockCipher} the handshake reply is ${bedrockCipher ? 'encrypted' : 'plain'} and the session is recorded`, async () => {
+		const ids = Object.fromEntries([['LoginPacket', 1], ['ServerToClientHandshakePacket', 3], ['ClientToServerHandshakePacket', 4], ['NetworkSettingsPacket', 143], ['RequestNetworkSettingsPacket', 193], ...t.WANTED.map((n, i) => [n, 300 + i])]);
+		const out = fs.mkdtempSync(path.join(os.tmpdir(), 'tracer-'));
+		fs.writeFileSync(path.join(out, 'info.json'), JSON.stringify({ version: INFO.version, packets: ids }));
+		const server = t.makeKeys();
+		const state = { compressed: true, cipher: null };
+		const [sent, replies] = [[], []];
+		let deliver = null;
+		const reply = (packets, s) => setImmediate(() => deliver(t.encodeBatch(packets, s)));
+		const send = (batch) => {
+			sent.push(batch);
+			if (sent.length === 1) return reply([t.varint(143)], {});
+			if (sent.length > 2) {
+				replies.push(...t.decodeBatch(batch, state).map((r) => r.id));
+				return reply(t.WANTED.map((n) => t.varint(ids[n])), state);
+			}
+			const p = t.decodeBatch(batch, state)[0].packet;
+			const [length, at] = t.readVarint(p, 5);
+			const request = p.subarray(at, at + length);
+			const cpk = part(JSON.parse(request.subarray(4, 4 + request.readUInt32LE(0))).Token, 1).cpk;
+			const salt = crypto.randomBytes(16);
+			const secret = crypto.diffieHellman({ privateKey: server.privateKey, publicKey: crypto.createPublicKey({ key: Buffer.from(cpk, 'base64'), format: 'der', type: 'spki' }) });
+			if (bedrockCipher) state.cipher = new t.Cipher(crypto.createHash('sha256').update(salt).update(secret).digest());
+			const token = t.jwt({ salt: salt.toString('base64') }, server);
+			reply([Buffer.concat([t.varint(3), t.varint(token.length), Buffer.from(token)])], { compressed: true });
+		};
+		const link = { bedrockCipher, send, close() {}, open: async (onMessage) => { deliver = onMessage; } };
+		const code = await t.trace({ protocol_info: path.join(out, 'info.json'), out, port: 19132, deadline: 10 }, () => {}, link);
+		const capture = fs.readFileSync(path.join(out, 'capture.bin'));
+		const recorded = [];
+		for (let i = 0; i < capture.length; i += 6 + capture.readUInt32BE(i + 2)) recorded.push(capture.readUInt16BE(i));
+		assert.deepEqual([code, replies, recorded], [0, [4], [143, 3, ...t.WANTED.map((n) => ids[n])]]);
+	});
+}
 
 test('a capture record is the ID, the length, then the packet, and arguments need both paths', () => {
 	const capture = t.encodeCapture([{ id: 0x1a2, packet: Buffer.from('ab') }, { id: 11, packet: Buffer.alloc(0) }]);

@@ -102,7 +102,9 @@ for (const bedrockCipher of [false, true]) {
 test('a capture record is the ID, the length, then the packet, and arguments need both paths', () => {
 	const capture = t.encodeCapture([{ id: 0x1a2, packet: Buffer.from('ab') }, { id: 11, packet: Buffer.alloc(0) }]);
 	assert.deepEqual(capture, Buffer.from([0x01, 0xa2, 0, 0, 0, 2, 0x61, 0x62, 0, 11, 0, 0, 0, 0]));
-	assert.deepEqual(t.parseArgs(['--protocol-info', 'p.json', '--out', '/o']), { protocol_info: 'p.json', out: '/o', port: 19132, deadline: 90 });
+	assert.deepEqual(t.parseArgs(['--protocol-info', 'p.json', '--out', '/o']), { protocol_info: 'p.json', out: '/o', port: 19132, deadline: 90, transport: 'nethernet' });
+	assert.equal(t.parseArgs(['--protocol-info', 'p', '--out', '/o', '--transport', 'raknet']).transport, 'raknet');
+	assert.throws(() => t.parseArgs(['--protocol-info', 'p', '--out', '/o', '--transport', 'quic']), /nethernet or raknet/);
 	assert.throws(() => t.parseArgs(['--out', '/o']), /required/);
 	assert.throws(() => t.parseArgs(['--protocol-info', 'p', '--out', '/o', '--port', 'x']), /positive/);
 	assert.throws(() => t.parseArgs(['--verbose']), /Unknown option/);

@@ -28,7 +28,8 @@ test('the container is on its own smoke network only, with limits, a smoke name,
 	assert.ok(mounts.some((m) => /packages[\\/]bedrock-data[\\/]protocol_info\.json:\/proto\/protocol_info\.json:ro$/.test(m)));
 	assert.deepEqual(mounts.filter((m) => /^\/(usr|lib|bin|opt)\//.test(m)), [], 'nothing from the host system is mounted');
 	assert.match(args[args.indexOf('bash') - 1], /^ubuntu:24\.04@sha256:[0-9a-f]{64}$/);
-	assert.deepEqual(args.slice(-5), ['bash', '/tool/run.sh', 'bedrock-server-9.8.7.6.zip', record.NODE.file, record.NODE.sha256]);
+	assert.deepEqual(args.slice(-6), ['bash', '/tool/run.sh', 'bedrock-server-9.8.7.6.zip', record.NODE.file, record.NODE.sha256, 'nethernet']);
+	assert.equal(record.dockerArgs({ file: 'b.zip' }, '/c', '/o', '1:1', 'raknet').at(-1), 'raknet');
 });
 
 test('the Node pin is an exact 22.x linux-x64 release from nodejs.org with a SHA-256', () => {
@@ -59,7 +60,11 @@ test('a dry run names the capture path and runs docker under timeout', async () 
 	const lines = [];
 	assert.equal(await record.main(['--links-file', path.join(dir, 'links.json'), '--cache', path.join(dir, 'cache'), '--dry-run'], (s) => lines.push(s)), 0);
 	assert.equal(lines[1], `would write ${path.join(dir, 'cache', 'captures', '9.8.7.6', 'capture.bin')}`);
-	assert.match(lines[2], new RegExp(`^would run timeout --kill-after=10 ${record.SECONDS} docker run --rm `));
+	assert.match(lines[2], new RegExp(`^would run timeout --kill-after=10 ${record.SECONDS} docker run --rm .* nethernet$`));
+	const raknet = [];
+	await record.main(['--transport', 'raknet', '--links-file', path.join(dir, 'links.json'), '--dry-run'], (s) => raknet.push(s));
+	assert.match(raknet[2], / raknet$/);
+	await assert.rejects(record.main(['--transport', 'quic', '--dry-run']), /nethernet or raknet/);
 });
 
 // A stand-in docker that logs each call and answers as the test asks, so every path

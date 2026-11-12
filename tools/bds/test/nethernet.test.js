@@ -115,3 +115,22 @@ test('batches go out segmented on the reliable channel, come in from both, and o
 	link.close();
 	assert.ok(peers.every((p) => p.closed));
 });
+
+test('a throw from onMessage reaches onClose once and no batch follows it', async () => {
+	const { link, peers } = fakes();
+	const boom = new Error('bad packet');
+	const [got, closed] = [[], []];
+	await link.open((m) => {
+		got.push(m);
+		throw boom;
+	}, (e) => closed.push(e));
+	const [reliable, unreliable] = peers[1].channels;
+	reliable.onMessage.fns[0](Buffer.from([0, 1]));
+	unreliable.onMessage.fns[0](Buffer.from([0, 2]));
+	reliable.onMessage.fns[0](Buffer.from([0, 3]));
+	peers[1].connectionStateChange.fns[0]('closed');
+	assert.deepEqual(got, [Buffer.from([1])]);
+	assert.deepEqual(closed, [boom]);
+	link.close();
+	assert.doesNotThrow(() => link.close());
+});

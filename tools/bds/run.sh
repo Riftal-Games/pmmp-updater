@@ -42,7 +42,8 @@ cd bds
 
 # BDS still listens with transport=raknet, though it logs that only NetherNet takes logins.
 # A key Mojang renames would otherwise leave its default in place, online mode included.
-for kv in online-mode=false allow-list=false "transport=$4" enable-lan-visibility=false; do
+# Hashed block network IDs name a state with no palette of BDS's, which decode.js needs.
+for kv in online-mode=false allow-list=false "transport=$4" enable-lan-visibility=false block-network-ids-are-hashes=true; do
 	sed -i "s/^${kv%%=*}=.*/$kv/" server.properties
 	grep -qx "$kv" server.properties || { echo "server.properties has no ${kv%%=*} key" >&2; exit 1; }
 done

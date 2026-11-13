@@ -53,11 +53,21 @@ expect, because `StartGamePacket` carries only the data-driven blocks and a chec
 PR 3 measures it. With both halves, the ruling brings `canonical_block_states.nbt` back
 to the steward before the Windows BDS or the Ghidra route in #5 is taken.
 
+## Measured: Script API, BDS 1.26.60.6 and 1.26.63.1
+
+`node tools/bds/script.js` on 2026-11-13 reports MISMATCH, identical for builds 52886190
+(1.26.60.6) and 53340802 (1.26.63.1): 1480 block names, all ours, in 23942 states to our
+23960. 39 states ours lacks, such as `color` on flattened blocks, sit in 4715 of them;
+dropping those merges none. Then `chalkboard` `direction` 4 to 15 and `creaking_heart`
+`awake` are missing, 18 states: BlockStates lists `direction` as 0 to 3, and no `awake`
+resolved unchanged. No state `version`, and no order: the API has no network ID, and the
+pack's own order first differs inside `leaf_litter`.
+
 ## Decision
 
 | File | Source | Measured |
 |---|---|---|
-| `canonical_block_states.nbt` | neither: samples MISMATCH, missing 14 blocks with no stated reason and giving no state order; packets carry only the data-driven blocks and a checksum (ADR 001). Back to the steward before #5 | samples, above |
+| `canonical_block_states.nbt` | neither: samples MISMATCH, missing 14 blocks with no stated reason and giving no state order; Script API MISMATCH, 39 extra states, 18 missing, no order or `version`; packets carry only the data-driven blocks and a checksum (ADR 001). Back to the steward before #5 | samples and Script API, above |
 | `required_item_list.json` | BDS packets, `ItemRegistryPacket`; samples MISMATCH, a subset whose 1627 IDs agree | samples, above; packets PR 3 |
 | `data_driven_blocks.nbt` | BDS packets, `StartGamePacket` | PR 3 |
 | `creative/construction.json` | BDS packets, `CreativeContentPacket` | PR 3 |

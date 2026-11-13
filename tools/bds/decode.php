@@ -3,10 +3,12 @@
 declare(strict_types=1);
 
 // Decodes the packets ADR 002 sources BedrockData files from, out of a capture.bin
-// tracer.js wrote, with packages/bedrock-protocol at /protocol, and prints them as JSON for
-// decode.js. Packet IDs and layouts come from that package alone. The image's PocketMine-MP
-// phar supplies only what does not change per version: nbt, binaryutils, math, color, uuid.
-// Usage: php decode.php <capture.bin>
+// tracer.js wrote, with the bedrock-protocol package at <protocol dir>, and prints them as
+// JSON for decode.js. Packet IDs and layouts come from that package alone. The autoloader
+// named first supplies only what does not change per version: nbt, binaryutils, math, color
+// and uuid, from the PocketMine-MP phar or the package's own composer install. ext-encoding
+// comes from the PHP it runs on.
+// Usage: php decode.php <autoload.php> <protocol dir> <capture.bin>
 
 use pmmp\encoding\ByteBufferReader;
 use pocketmine\nbt\{LittleEndianNbtSerializer, TreeRoot};
@@ -15,15 +17,17 @@ use pocketmine\network\mcpe\protocol as P;
 use pocketmine\network\mcpe\protocol\serializer\NetworkNbtSerializer;
 use pocketmine\network\mcpe\protocol\types\inventory\{ItemStack, ItemStackExtraData, ItemStackExtraDataShield};
 
-require 'phar:///opt/pocketmine/PocketMine-MP.phar/vendor/autoload.php';
+count($argv) === 4 or throw new InvalidArgumentException('usage: php decode.php <autoload.php> <protocol dir> <capture.bin>');
+[, $autoload, $protocol, $capture] = $argv;
+require $autoload;
 
-// Prepended, and failing rather than falling through, so no class of the phar's own
-// protocol library is ever loaded in place of ours.
-spl_autoload_register(function(string $class) : void{
+// Prepended, and failing rather than falling through, so no protocol class of another
+// library the autoloader knows is ever loaded in place of ours.
+spl_autoload_register(function(string $class) use ($protocol) : void{
 	$prefix = 'pocketmine\\network\\mcpe\\protocol\\';
 	if(str_starts_with($class, $prefix)){
-		$file = '/protocol/src/' . str_replace('\\', '/', substr($class, strlen($prefix))) . '.php';
-		require is_file($file) ? $file : throw new LogicException("$class is not in packages/bedrock-protocol");
+		$file = "$protocol/src/" . str_replace('\\', '/', substr($class, strlen($prefix))) . '.php';
+		require is_file($file) ? $file : throw new LogicException("$class is not in $protocol");
 	}
 }, true, true);
 
@@ -47,7 +51,7 @@ $keys = [
 	P\BiomeDefinitionListPacket::class => 'biomes', P\AvailableActorIdentifiersPacket::class => 'actors', P\JigsawStructureDataPacket::class => 'jigsaw', P\VoxelShapesPacket::class => 'voxel_shapes',
 ];
 
-$data = file_get_contents($argv[1] ?? throw new InvalidArgumentException('usage: php decode.php <capture.bin>'));
+$data = file_get_contents($capture);
 $out = ['protocol' => P\ProtocolInfo::CURRENT_PROTOCOL, 'version' => P\ProtocolInfo::MINECRAFT_VERSION_NETWORK, 'records' => 0, 'unknown' => []];
 for($at = 0; $at < strlen($data); $at += 6 + $len){
 	['id' => $id, 'len' => $len] = unpack('nid/Nlen', $data, $at);

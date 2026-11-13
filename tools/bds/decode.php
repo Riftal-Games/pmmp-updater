@@ -16,6 +16,7 @@ use pocketmine\nbt\tag\{CompoundTag, ListTag};
 use pocketmine\network\mcpe\protocol as P;
 use pocketmine\network\mcpe\protocol\serializer\NetworkNbtSerializer;
 use pocketmine\network\mcpe\protocol\types\inventory\{ItemStack, ItemStackExtraData, ItemStackExtraDataShield};
+use pocketmine\network\mcpe\protocol\types\recipe\{MolangItemDescriptor, RecipeIngredient, ShapedRecipe, ShapelessRecipe, StringIdMetaItemDescriptor, TagItemDescriptor};
 
 count($argv) === 4 or throw new InvalidArgumentException('usage: php decode.php <autoload.php> <protocol dir> <capture.bin>');
 [, $autoload, $protocol, $capture] = $argv;
@@ -46,6 +47,19 @@ $stack = function(ItemStack $s) use (&$names, $le) : ?array{
 	}
 	return $out;
 };
+$name = function(int $id) use (&$names) : ?string{
+	return $names[$id] ?? null;
+};
+$ingredient = fn(RecipeIngredient $i) : ?array => match(true){
+	($d = $i->getDescriptor()) === null => null,
+	$d instanceof StringIdMetaItemDescriptor => ['id' => $d->getId(), 'meta' => $d->getMeta(), 'count' => $i->getCount()],
+	$d instanceof TagItemDescriptor => ['tag' => $d->getTag(), 'count' => $i->getCount()],
+	$d instanceof MolangItemDescriptor => ['molang_expression' => $d->getMolangExpression(), 'molang_version' => $d->getMolangVersion(), 'count' => $i->getCount()],
+};
+$unlock = fn($r) : ?array => ($u = $r->getUnlockingRequirement()?->getUnlockingIngredients()) === null ? null : array_map($ingredient, $u);
+$shaped = fn(ShapedRecipe $r) : array => ['input' => array_map(fn($row) => array_map($ingredient, $row), $r->getInput()), 'output' => array_map($stack, $r->getOutput()), 'block' => $r->getBlockName(), 'priority' => $r->getPriority(), 'symmetric' => $r->isSymmetric(), 'unlocking' => $unlock($r)];
+$shapeless = fn(ShapelessRecipe $r) : array => ['input' => array_map($ingredient, $r->getInputs()), 'output' => array_map($stack, $r->getOutputs()), 'block' => $r->getBlockName(), 'priority' => $r->getPriority(), 'unlocking' => $unlock($r)];
+$smithing = fn($r) : array => ['template' => $ingredient($r->getTemplate()), 'input' => $ingredient($r->getInput()), 'addition' => $ingredient($r->getAddition()), 'block' => $r->getBlockName()];
 $keys = [
 	P\StartGamePacket::class => 'start_game', P\ItemRegistryPacket::class => 'items', P\CreativeContentPacket::class => 'creative', P\CraftingDataPacket::class => 'crafting',
 	P\BiomeDefinitionListPacket::class => 'biomes', P\AvailableActorIdentifiersPacket::class => 'actors', P\JigsawStructureDataPacket::class => 'jigsaw', P\VoxelShapesPacket::class => 'voxel_shapes',
@@ -85,12 +99,19 @@ for($at = 0; $at < strlen($data); $at += 6 + $len){
 			'groups' => array_map(fn($g) => ['category' => $g->getCategoryId(), 'name' => $g->getCategoryName(), 'icon' => $stack($g->getIcon())], $pk->getGroups()),
 			'items' => array_map(fn($i) => ['group' => $i->getGroupId(), 'item' => $stack($i->getItem())], $pk->getItems()),
 		],
-		// Only the outputs carry block network IDs.
-		'crafting' => ['outputs' => array_map($stack, array_merge(
-			...array_map(fn($r) => $r->getOutput(), [...$pk->shapedRecipes, ...$pk->shapedChemistryRecipes]),
-			...array_map(fn($r) => $r->getOutputs(), [...$pk->shapelessRecipes, ...$pk->userDataShapelessRecipes, ...$pk->shapelessChemistryRecipes]),
-			...[array_map(fn($r) => $r->getOutput(), $pk->smithingTransformRecipes)],
-		))],
+		// Keyed by the generator's recipe types. Potion recipes name items by network ID, so
+		// their names come from ItemRegistryPacket, as the generator takes them.
+		'crafting' => [
+			'shaped_crafting' => array_map($shaped, $pk->shapedRecipes), 'shaped_chemistry' => array_map($shaped, $pk->shapedChemistryRecipes),
+			'shapeless_crafting' => array_map($shapeless, $pk->shapelessRecipes), 'shapeless_shulker_box' => array_map($shapeless, $pk->userDataShapelessRecipes), 'shapeless_chemistry' => array_map($shapeless, $pk->shapelessChemistryRecipes),
+			'special_hardcoded' => array_map(fn($r) => $r->getRecipeId()->toString(), $pk->multiRecipes),
+			'smithing' => array_map(fn($r) => $smithing($r) + ['output' => $stack($r->getOutput())], $pk->smithingTransformRecipes), 'smithing_trim' => array_map($smithing, $pk->smithingTrimRecipes),
+			'potion_type' => array_map(fn($r) => [
+				'input' => ['id' => $name($r->getInputItemId()), 'meta' => $r->getInputItemMeta(), 'count' => 1], 'ingredient' => ['id' => $name($r->getIngredientItemId()), 'meta' => $r->getIngredientItemMeta(), 'count' => 1],
+				'output' => $stack(new ItemStack($r->getOutputItemId(), $r->getOutputItemMeta(), 1, 0, '')),
+			], $pk->potionTypeRecipes),
+			'potion_container_change' => array_map(fn($r) => ['input' => $name($r->getInputItemId()), 'ingredient' => ['id' => $name($r->getIngredientItemId()), 'meta' => 0, 'count' => 1], 'output' => $name($r->getOutputItemId())], $pk->potionContainerRecipes),
+		],
 		// Rounded as BedrockData stores them.
 		'biomes' => array_combine(array_map(fn($b) => $b->getBiomeName(), $defs = $pk->buildDefinitionsFromData()), array_map(fn($b) => [
 			'id' => $b->getId(), 'temperature' => round($b->getTemperature(), 3), 'downfall' => round($b->getDownfall(), 3), 'foliageSnow' => round($b->getFoliageSnow(), 3),

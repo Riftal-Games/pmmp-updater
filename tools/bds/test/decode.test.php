@@ -19,7 +19,7 @@ use pocketmine\network\mcpe\protocol\serializer\NetworkNbtSerializer;
 use pocketmine\network\mcpe\protocol\types as T;
 use pocketmine\network\mcpe\protocol\types\biome\BiomeDefinitionEntry;
 use pocketmine\network\mcpe\protocol\types\inventory\{CreativeGroupEntry, CreativeItemEntry, ItemStack, ItemStackExtraData};
-use pocketmine\network\mcpe\protocol\types\recipe\ShapelessRecipe;
+use pocketmine\network\mcpe\protocol\types\recipe as R;
 use Ramsey\Uuid\Uuid;
 
 $autoload = $argv[1] ?? throw new InvalidArgumentException('usage: php decode.test.php <autoload.php>');
@@ -72,8 +72,18 @@ $creative = P\CreativeContentPacket::create(
 	[new CreativeGroupEntry(1, 'fixture_group', new ItemStack(-1, 0, 1, 7, ''))],
 	[new CreativeItemEntry(1, new ItemStack(5, 3, 2, 0, $extra), 0)]
 );
-$recipe = fn(array $outputs) => new ShapelessRecipe('fixture_recipe', [], $outputs, Uuid::fromString(Uuid::NIL), 'fixture_table', 0, null, 1);
-$crafting = P\CraftingDataPacket::create([], [$recipe([new ItemStack(-1, 0, 1, 8, '')])], [], [], [$recipe([new ItemStack(5, 0, 4, 0, ''), ItemStack::null()])], [], [], [], [], [], [], true);
+// One recipe in every list the generator reads, with each kind of ingredient and an empty slot.
+$id = fn(string $name, int $meta) => new R\RecipeIngredient(new R\StringIdMetaItemDescriptor($name, $meta), 1);
+[$tag, $molang, $nil] = [new R\RecipeIngredient(new R\TagItemDescriptor('fixture:tag'), 2), new R\RecipeIngredient(new R\MolangItemDescriptor('q.fixture', 9), 1), Uuid::fromString(Uuid::NIL)];
+$unlock = new R\RecipeUnlockingRequirement(R\RecipeUnlockingContext::NONE, [$id('fixture:dust', 32767)]);
+$shaped = fn(bool $symmetric) => new R\ShapedRecipe('fixture_shaped', [[$id('fixture:lamp', 1), new R\RecipeIngredient(null, 0)]], [new ItemStack(-1, 0, 1, 8, '')], $nil, 'fixture_table', 2, $symmetric, $unlock, 2);
+$recipe = fn(array $outputs) => new R\ShapelessRecipe('fixture_recipe', [$tag, $molang], $outputs, $nil, 'fixture_table', 0, null, 1);
+$crafting = P\CraftingDataPacket::create(
+	[$shaped(true)], [$recipe([new ItemStack(-1, 0, 1, 8, '')])], [new R\MultiRecipe(Uuid::fromString('00000000-0000-0000-0000-000000000001'), 3)], [$recipe([])], [$recipe([new ItemStack(5, 0, 4, 0, ''), ItemStack::null()])], [$shaped(false)],
+	[new R\SmithingTransformRecipe('fixture_smith', $id('fixture:dust', 0), $id('fixture:lamp', 1), $tag, new ItemStack(5, 0, 1, 0, ''), 'fixture_smithy', 4)],
+	[new R\SmithingTrimRecipe('fixture_trim', $tag, $molang, $id('fixture:dust', 0), 'fixture_smithy', 5)],
+	[new R\PotionTypeRecipe(5, 1, -1, 0, 5, 2)], [new R\PotionContainerChangeRecipe(5, -1, 99)], [], true
+);
 $biomes = P\BiomeDefinitionListPacket::fromDefinitions([new BiomeDefinitionEntry('fixture:plains', 1, 0.123, 0.5, 0.25, 0.1, 0.2, new Color(1, 2, 3, 4), true, ['fixture_warm'])]);
 $mobs = CompoundTag::create()->setTag('idlist', new ListTag([CompoundTag::create()->setString('id', 'fixture:mob')]));
 $pools = CompoundTag::create()->setString('fixture_pool', 'fixture:start');
@@ -85,6 +95,10 @@ $capture = implode('', [$record($start), $record($items), $record($creative), $r
 
 $network = fn(CompoundTag $t) => hash('sha256', (new NetworkNbtSerializer())->write(new TreeRoot($t)));
 $stack = fn(string $name, int $meta, int $count, int $block, ?string $nbt = null, array $on = [], array $off = []) => ['name' => $name, 'meta' => $meta, 'count' => $count, 'block' => $block, 'nbt' => $nbt, 'can_place_on' => $on, 'can_destroy' => $off];
+$in = fn(?string $name, int $meta) => ['id' => $name, 'meta' => $meta, 'count' => 1];
+[$tagIn, $molangIn] = [['tag' => 'fixture:tag', 'count' => 2], ['molang_expression' => 'q.fixture', 'molang_version' => 9, 'count' => 1]];
+$shapedOut = fn(bool $symmetric) => ['input' => [[$in('fixture:lamp', 1), null]], 'output' => [$stack('fixture:lamp', 0, 1, 8)], 'block' => 'fixture_table', 'priority' => 2, 'symmetric' => $symmetric, 'unlocking' => [$in('fixture:dust', 32767)]];
+$recipeOut = fn(array $outputs) => ['input' => [$tagIn, $molangIn], 'output' => $outputs, 'block' => 'fixture_table', 'priority' => 0, 'unlocking' => null];
 $want = [
 	'protocol' => P\ProtocolInfo::CURRENT_PROTOCOL, 'version' => P\ProtocolInfo::MINECRAFT_VERSION_NETWORK, 'records' => 9, 'unknown' => [1000],
 	'start_game' => ['hashes' => true, 'experiments' => ['fixture_toggle' => true], 'education' => true, 'data_driven_blocks' => $network(CompoundTag::create()->setTag('blockPalette', new ListTag([CompoundTag::create()->setString('name', 'fixture:glow')->setTag('states', $glow)])))],
@@ -96,7 +110,15 @@ $want = [
 		'groups' => [['category' => 1, 'name' => 'fixture_group', 'icon' => $stack('fixture:lamp', 0, 1, 7)]],
 		'items' => [['group' => 0, 'item' => $stack('fixture:dust', 3, 2, 0, base64_encode("\x0a\x00\x00\x03\x0b\x00fixture_tag\x01\x00\x00\x00\x00"), ['fixture:slab'], ['fixture:lamp'])]],
 	],
-	'crafting' => ['outputs' => [$stack('fixture:lamp', 0, 1, 8), $stack('fixture:dust', 0, 4, 0), null]],
+	'crafting' => [
+		'shaped_crafting' => [$shapedOut(true)], 'shaped_chemistry' => [$shapedOut(false)],
+		'shapeless_crafting' => [$recipeOut([$stack('fixture:lamp', 0, 1, 8)])], 'shapeless_shulker_box' => [$recipeOut([])], 'shapeless_chemistry' => [$recipeOut([$stack('fixture:dust', 0, 4, 0), null])],
+		'special_hardcoded' => ['00000000-0000-0000-0000-000000000001'],
+		'smithing' => [['template' => $in('fixture:dust', 0), 'input' => $in('fixture:lamp', 1), 'addition' => $tagIn, 'block' => 'fixture_smithy', 'output' => $stack('fixture:dust', 0, 1, 0)]],
+		'smithing_trim' => [['template' => $tagIn, 'input' => $molangIn, 'addition' => $in('fixture:dust', 0), 'block' => 'fixture_smithy']],
+		'potion_type' => [['input' => $in('fixture:dust', 1), 'ingredient' => $in('fixture:lamp', 0), 'output' => $stack('fixture:dust', 2, 1, 0)]],
+		'potion_container_change' => [['input' => 'fixture:dust', 'ingredient' => $in('fixture:lamp', 0), 'output' => null]],
+	],
 	'biomes' => ['fixture:plains' => ['id' => 1, 'temperature' => 0.123, 'downfall' => 0.5, 'foliageSnow' => 0.25, 'depth' => 0.1, 'scale' => 0.2, 'rain' => true, 'tags' => ['fixture_warm'], 'mapWaterColour' => ['r' => 1, 'g' => 2, 'b' => 3, 'a' => 4]]],
 	'actors' => $network($mobs),
 	'jigsaw' => $network($pools),

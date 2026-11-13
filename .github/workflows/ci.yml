@@ -79,6 +79,13 @@ jobs:
         timeout-minutes: 10
         run: bash .github/php-ci/run.sh "$PACKAGE" php vendor/bin/phpunit --bootstrap vendor/autoload.php --fail-on-warning tests/phpunit
 
+      # tools/bds/decode.php decodes captures with this package, so its test runs here, on
+      # the package's dependencies as installed above. Nothing it needs is on the network,
+      # and it writes only to the container's own /tmp.
+      - name: Run the capture decoder's test
+        timeout-minutes: 5
+        run: docker run --rm --init --network none -m 1g --cpus 1 --user "$(id -u):$(id -g)" -v "$(realpath .):/repo:ro" -w /repo "$(cat "$RUNNER_TEMP/php-ci.iid")" php tools/bds/test/decode.test.php "/repo/$PACKAGE/vendor/autoload.php"
+
       # Upstream's codegen job: regenerate every packet's create() methods, format them,
       # and fail on any difference. Both tools write into the tree, so they run on a copy
       # in the runner's temp directory, which is then compared with the checkout. The

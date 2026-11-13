@@ -142,13 +142,14 @@ function valueSets(states) {
 
 // A state's position in canonical_block_states.nbt is its network ID, so the states both
 // lists share must stand in the same order, element by element, across blocks and within.
-function orderDiffers(a, b) {
+function orderDiffers(a, b, label) {
 	let i = 0;
 	while ((i < a.length || i < b.length) && a[i] === b[i]) i++;
-	return i === a.length && i === b.length ? [] : [`from shared state ${i}: samples ${a[i] ?? 'end of list'}, ours ${b[i] ?? 'end of list'}`];
+	return i === a.length && i === b.length ? [] : [`from shared state ${i}: ${label} ${a[i] ?? 'end of list'}, ours ${b[i] ?? 'end of list'}`];
 }
 
-function compareStates(derived, ours) {
+// `label` names the derived side in the report, so another source can share these rules.
+function compareStates(derived, ours, label = 'samples') {
 	const [dk, ok] = [derived.map(stateKey), ours.map(stateKey)];
 	const [ds, os, dv, ov] = [new Set(dk), new Set(ok), valueSets(derived), valueSets(ours)];
 	const values = [];
@@ -156,19 +157,19 @@ function compareStates(derived, ours) {
 		if (!ov.has(name)) continue;
 		for (const k of new Set([...props.keys(), ...ov.get(name).keys()])) {
 			const [a, b] = [props.get(k) || new Set(), ov.get(name).get(k) || new Set()];
-			if (minus(a, b).length || minus(b, a).length) values.push(`${name} ${k}: samples only [${minus(a, b)}], ours only [${minus(b, a)}]`);
+			if (minus(a, b).length || minus(b, a).length) values.push(`${name} ${k}: ${label} only [${minus(a, b)}], ours only [${minus(b, a)}]`);
 		}
 	}
 	return {
-		samples: { names: dv.size, states: dk.length },
+		[label]: { names: dv.size, states: dk.length },
 		ours: { names: ov.size, states: ok.length },
-		names_only_samples: minus(dv.keys(), ov),
+		[`names_only_${label}`]: minus(dv.keys(), ov),
 		names_only_ours: minus(ov.keys(), dv),
 		values_differ: values,
-		states_only_samples: minus(dk, os),
+		[`states_only_${label}`]: minus(dk, os),
 		states_only_ours: minus(ok, ds),
-		order_differs: orderDiffers(dk.filter((k) => os.has(k)), ok.filter((k) => ds.has(k))),
-		fields_not_in_samples: [...new Set(ours.flatMap((s) => s.fields))],
+		order_differs: orderDiffers(dk.filter((k) => os.has(k)), ok.filter((k) => ds.has(k)), label),
+		[`fields_not_in_${label}`]: [...new Set(ours.flatMap((s) => s.fields))],
 	};
 }
 

@@ -35,6 +35,10 @@ const RECIPES = {
 	'recipes/smithing.json': [{ addition: { tag: 'fixture:tag' }, block: 'fixture_smithy', input: { name: 'fixture:slab' }, output: { block_states: LIT, name: 'fixture:lamp' }, template: { meta: 32767, name: 'fixture:dust' } }],
 	'recipes/potion_type.json': [{ ingredient: { name: 'fixture:dye' }, input: { meta: 5, name: 'fixture:dust' }, output: { meta: 6, name: 'fixture:dust' } }],
 	'recipes/potion_container_change.json': [{ ingredient: { name: 'fixture:dye' }, input_item_name: 'fixture:dust', output_item_name: 'fixture:dye' }],
+	'recipes/shaped_chemistry.json': [{ block: 'fixture_lab', input: { A: { meta: 3, name: 'fixture:dye' } }, output: [{ meta: 4, name: 'fixture:dye' }], priority: 0, shape: ['A'] }],
+	'recipes/shapeless_chemistry.json': [{ block: 'fixture_lab', input: [{ meta: 4, name: 'fixture:dye' }], output: ['fixture:dust'], priority: 0 }],
+	'recipes/shapeless_shulker_box.json': [{ block: 'fixture_table', input: [{ name: 'fixture:slab' }, { tag: 'fixture:tag' }], output: ['fixture:pick'], priority: 3 }],
+	'recipes/smithing_trim.json': [{ addition: { meta: 3, name: 'fixture:dye' }, block: 'fixture_smithy', input: { name: 'fixture:pick' }, template: { meta: 32767, name: 'fixture:dust' } }],
 };
 const BIOMES = { 'fixture:plains': { id: 1, rain: true, tags: ['warm'] } };
 const SHAPES = { nameMap: { 'fixture:box': 1 }, shapes: [{ cells: { storage: [1], xSize: 1, ySize: 1, zSize: 1 }, x: [0, 1], y: [0, 1], z: [0, 1] }] };
@@ -61,7 +65,10 @@ function dump(hashes = true) {
 				{ input: [[tagIn()]], output: [stack('fixture:dust', 0)], block: 'fixture_table', priority: 0, symmetric: true, unlocking: null },
 				{ input: [[ing('fixture:lamp', 1), null], [ing('fixture:lamp', 1), ing('fixture:dust', 32767)]], output: [stack('fixture:lamp', id(1))], block: 'fixture_table', priority: 2, symmetric: true, unlocking: [ing('fixture:dust', 32767)] },
 			],
-			shaped_chemistry: [], shapeless_shulker_box: [], shapeless_chemistry: [], smithing_trim: [],
+			shaped_chemistry: [{ input: [[ing('fixture:dye', 3)]], output: [stack('fixture:dye', 0, { meta: 4 })], block: 'fixture_lab', priority: 0, symmetric: true, unlocking: null }],
+			shapeless_shulker_box: [{ input: [ing('fixture:slab', 0), tagIn()], output: [stack('fixture:pick', 0)], block: 'fixture_table', priority: 3, unlocking: [] }],
+			shapeless_chemistry: [{ input: [ing('fixture:dye', 4)], output: [stack('fixture:dust', 0)], block: 'fixture_lab', priority: 0, unlocking: [] }],
+			smithing_trim: [{ template: ing('fixture:dust', 32767), input: ing('fixture:pick', 0), addition: ing('fixture:dye', 3), block: 'fixture_smithy' }],
 			shapeless_crafting: [{ input: [ing('fixture:dust:3', 3), { molang_expression: 'q.x', molang_version: 9, count: 1 }], output: [stack('fixture:dust', 0, { count: 2 })], block: 'fixture_table', priority: 1, unlocking: [] }],
 			special_hardcoded: ['00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001'],
 			smithing: [{ template: ing('fixture:dust', 32767), input: ing('fixture:slab', 4), addition: tagIn(), block: 'fixture_smithy', output: stack('fixture:lamp', id(2)) }],
@@ -123,6 +130,15 @@ test('an ID that names no state, or a state of another block, a changed value, a
 		[(d) => { d.crafting.potion_container_change[0].output = null; }, 'recipes/potion_container_change.json', /^\[0\]\.output_item_name: capture null, ours "fixture:dye"$/],
 		[(d) => { d.crafting.special_hardcoded.pop(); }, 'recipes/special_hardcoded.json', /^: length capture 1, ours 2$/],
 		[(d) => { d.crafting.smithing = []; }, 'recipes/smithing.json', /^: length capture 0, ours 1$/],
+		[(d) => { d.crafting.shaped_chemistry = []; }, 'recipes/shaped_chemistry.json', /^: length capture 0, ours 1$/],
+		[(d) => { d.crafting.shaped_chemistry[0].unlocking = [tagIn()]; }, 'recipes/shaped_chemistry.json', /^\[0\]\.unlockingIngredients: capture \[\{"tag":"fixture:tag"\}\], ours absent$/],
+		[(d) => { d.crafting.shaped_chemistry[0].symmetric = false; }, 'recipes/shaped_chemistry_asymmetric.json', /^not in packages\/bedrock-data$/],
+		[(d) => { d.crafting.shapeless_chemistry = []; }, 'recipes/shapeless_chemistry.json', /^: length capture 0, ours 1$/],
+		[(d) => { d.crafting.shapeless_chemistry[0].input[0].count = 2; }, 'recipes/shapeless_chemistry.json', /^\[0\]\.input\[0\]\.count: capture 2, ours absent$/],
+		[(d) => { d.crafting.shapeless_shulker_box = []; }, 'recipes/shapeless_shulker_box.json', /^: length capture 0, ours 1$/],
+		[(d) => { d.crafting.shapeless_shulker_box[0].unlocking = [tagIn()]; }, 'recipes/shapeless_shulker_box.json', /^\[0\]\.unlockingIngredients: capture \[\{"tag":"fixture:tag"\}\], ours absent$/],
+		[(d) => { d.crafting.smithing_trim = []; }, 'recipes/smithing_trim.json', /^: length capture 0, ours 1$/],
+		[(d) => { d.crafting.smithing_trim[0].addition.count = 2; }, 'recipes/smithing_trim.json', /^\[0\]\.addition\.count: capture 2, ours absent$/],
 	]) {
 		const d = dump();
 		mutate(d);

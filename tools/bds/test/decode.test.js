@@ -17,6 +17,10 @@ const nbt = (states) => Buffer.concat(states.map((s) => Buffer.concat([Buffer.fr
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const stack = (name, block, extra = {}) => ({ name, meta: 0, count: 1, block, nbt: null, can_place_on: [], can_destroy: [], ...extra });
 const LIT = dec.leStates(STATES[2].states).toString('base64');
+const NBT = Buffer.from([10, 0, 0, 3, 1, 0, ...Buffer.from('x'), 1, 0, 0, 0, 0]).toString('base64');
+// Items with no block, so meta stands, and one carrying every extra field the generator keeps.
+const extras = () => [stack('fixture:dye', 0, { meta: 3 }), stack('fixture:dye', 0, { meta: 32767 }), stack('fixture:pick', 0, { nbt: NBT, can_place_on: ['fixture:slab'], can_destroy: ['fixture:lamp'] })];
+const OURS_EXTRAS = [{ name: 'fixture:dye', meta: 3 }, 'fixture:dye', { name: 'fixture:pick', nbt: NBT, can_place_on: ['fixture:slab'], can_destroy: ['fixture:lamp'] }];
 const BIOMES = { 'fixture:plains': { id: 1, rain: true, tags: ['warm'] } };
 const SHAPES = { nameMap: { 'fixture:box': 1 }, shapes: [{ cells: { storage: [1], xSize: 1, ySize: 1, zSize: 1 }, x: [0, 1], y: [0, 1], z: [0, 1] }] };
 
@@ -25,7 +29,7 @@ const data = () => fx.writeTree(fx.tempDir('bds-decode'), {
 	'protocol_info.json': { version: { major: 1, minor: 2, patch: 3, revision: 4, protocol_version: 99 } },
 	'required_item_list.json': { 'fixture:lamp': { runtime_id: -1, component_based: false, version: 2 }, 'fixture:dust': { runtime_id: 5, component_based: true, version: 1, component_nbt: 'AAA=' } },
 	'creative/construction.json': [{ group_icon: null, group_name: 'g', items: [{ name: 'fixture:lamp', block_states: LIT }, 'fixture:dust', { name: 'fixture:dust', count: 2 }] }],
-	'creative/nature.json': [], 'creative/equipment.json': [], 'creative/items.json': [],
+	'creative/nature.json': [], 'creative/equipment.json': [], 'creative/items.json': [{ group_icon: 'fixture:dye', group_name: 'h', items: OURS_EXTRAS }],
 	'data_driven_blocks.nbt': 'a', 'entity_identifiers.nbt': 'b', 'jigsaw_structures_data.nbt': 'c', 'biome_definitions.json': BIOMES, 'voxel_shapes.json': SHAPES,
 });
 
@@ -35,7 +39,7 @@ function dump(hashes = true) {
 	return {
 		protocol: 99, version: '1.2.3', records: 8, unknown: [], start_game: { hashes, experiments: [], education: false, data_driven_blocks: sha('a') },
 		items: [{ name: 'fixture:lamp', runtime_id: -1, component_based: false, version: 2, component_nbt: null }, { name: 'fixture:dust', runtime_id: 5, component_based: true, version: 1, component_nbt: 'AAA=' }],
-		creative: { groups: [{ category: 1, name: 'g', icon: null }], items: [stack('fixture:lamp', id(2)), stack('fixture:dust', 0), stack('fixture:dust', 0, { count: 2 })].map((item) => ({ group: 0, item })) },
+		creative: { groups: [{ category: 1, name: 'g', icon: null }, { category: 4, name: 'h', icon: extras()[1] }], items: [...[stack('fixture:lamp', id(2)), stack('fixture:dust', 0), stack('fixture:dust', 0, { count: 2 })].map((item) => ({ group: 0, item })), ...extras().map((item) => ({ group: 1, item }))] },
 		crafting: { outputs: [stack('fixture:lamp', id(1)), stack('fixture:dust', 0)] },
 		biomes: BIOMES, actors: sha('b'), jigsaw: sha('c'), voxel_shapes: { custom: 0, ...SHAPES },
 	};
@@ -66,7 +70,7 @@ test('a capture equal to ours matches, hashed or sequential, and names how its b
 	assert.match(lines[0], /CreativeContentPacket: 1 IDs, 1 became states of the item's own block, 0 did not\n[\s\S]*MATCH creative\/construction\.json[\s\S]*not compared: recipes\/potion_container_change\.json[\s\S]*\nMATCH$/);
 });
 
-test('an ID that names no state, or a state of another block, a changed value, a missing packet or an unknown one is a MISMATCH', () => {
+test('an ID that names no state, or a state of another block, a changed value, an item field ours lacks, a missing packet or an unknown one is a MISMATCH', () => {
 	for (const [mutate, file, want] of [
 		[(d) => { d.creative.items[0].item.block = 12345; }, 'blocks', /^12345$/],
 		[(d) => { d.crafting.outputs[0].name = 'fixture:slab'; }, 'blocks', /\(fixture:lamp for fixture:slab\)$/],
@@ -76,6 +80,10 @@ test('an ID that names no state, or a state of another block, a changed value, a
 		[(d) => { delete d.biomes; }, 'biome_definitions.json', /^BiomeDefinitionListPacket is not in the capture$/],
 		[(d) => { d.unknown = [999]; }, 'capture', /does not know: 999$/],
 		[(d) => { delete d.crafting; }, 'block network IDs', /^CraftingDataPacket is not in the capture, so its block network IDs are not accounted for$/],
+		[(d) => { d.creative.items[5].item.meta = 5; }, 'creative/items.json', /^\[0\]\.items\[2\]\.meta: capture 5, ours absent$/],
+		[(d) => { d.creative.items[3].item.nbt = NBT; }, 'creative/items.json', /^\[0\]\.items\[0\]\.nbt: capture "CgAAAwEAeAEAAAAA", ours absent$/],
+		[(d) => { d.creative.items[3].item.can_place_on = ['fixture:lamp']; }, 'creative/items.json', /^\[0\]\.items\[0\]\.can_place_on: capture \["fixture:lamp"\], ours absent$/],
+		[(d) => { d.creative.items[3].item.can_destroy = ['fixture:slab']; }, 'creative/items.json', /^\[0\]\.items\[0\]\.can_destroy: capture \["fixture:slab"\], ours absent$/],
 	]) {
 		const d = dump();
 		mutate(d);
@@ -83,6 +91,10 @@ test('an ID that names no state, or a state of another block, a changed value, a
 		const found = file === 'blocks' ? r.blocks.unresolved : r.rows.find((x) => x.file === file).diffs;
 		assert.ok(!r.match && found.some((s) => want.test(s)), `${file}: ${found}`);
 	}
+});
+
+test('an item takes the generator\'s form: meta 32767 is 0, and meta, nbt, can_place_on and can_destroy appear only when set', () => {
+	assert.deepEqual(extras().map((s) => dec.itemJson(s, () => null)), OURS_EXTRAS);
 });
 
 test('a MISMATCH is what main prints and returns: the row, the absent packet, MISMATCH last and exit 1', () => {

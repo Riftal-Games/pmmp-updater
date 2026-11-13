@@ -63,30 +63,81 @@ dropping those merges none. Then `chalkboard` `direction` 4 to 15 and `creaking_
 resolved unchanged. No state `version`, and no order: the API has no network ID, and the
 pack's own order first differs inside `leaf_litter`.
 
+## Measured: BDS packets, BDS 1.26.60.6 and 1.26.63.1, with our own server as control
+
+`node tools/bds/decode.js --capture <capture.bin>` on 2026-11-13, in WSL `Ubuntu-26.04`,
+re-decodes the runner's cached captures with `packages/bedrock-protocol` 1.26.60 (protocol
+2225) in `local-pocketmine-mp:latest` (`sha256:fe69b3c5...`) and compares all 19 packet
+rows with `packages/bedrock-data` 1.26.60.6 (protocol 2225). Each capture exits 1.
+
+- **Captures.** BDS Linux 1.26.60.6 (Build ID 52886190) and 1.26.63.1 (53340802), each
+  recorded by `record.js` over NetherNet on the isolated network, since BDS refuses RakNet
+  logins (ADR 003). After the header their reports are equal line for line, so no packet
+  row changes from 1.26.60.6 to 1.26.63.1.
+- **Block network IDs.** Both ran with `block-network-ids-are-hashes=true`, asserted by
+  `run.sh` and sent in `StartGamePacket`. Each ID is matched with FNV-1a 32 of a state in our
+  `canonical_block_states.nbt`. All 1065 in `CreativeContentPacket` and all 2506 in
+  `CraftingDataPacket` name one state of the item's own block.
+- **Recipes** take the form of pmmp-core's `tools/generate-bedrock-data-from-packets.php`.
+  As there, an ingredient's meta becomes a state through our `block_state_meta_map.json`
+  and `block_id_to_item_id_map.json`, so those two files are inputs here.
+- **Control.** Our `local-pocketmine-mp` above, over RakNet, sends sequential IDs, each
+  taken as an index in our file. All 1069 and 1421 name a state of the item's own block. It
+  MATCHes the six rows pmmp-core sends as stored, and `potion_container_change.json`. It
+  differs on the rows pmmp-core rebuilds:
+  - creative: it leaves out items and icons it does not register and re-encodes block states
+    (`src/inventory/CreativeInventory.php:66-73`), and tags every group icon
+    `___GroupBugWorkaround___` (`src/network/mcpe/cache/CreativeInventoryCache.php:141`);
+  - recipes: it reads shaped recipes of `crafting_table` only, shapeless, potion type and
+    container change recipes, skipping any with an item it does not register
+    (`src/crafting/CraftingManagerFromDataHelper.php:209-331`). It sends each with priority
+    50, no unlocking ingredients and as symmetric, sends furnace recipes as shapeless, and
+    sends no other kind (`src/network/mcpe/cache/CraftingDataCache.php:81-210`). Read that
+    way, 819 of its 964 shaped and 1272 of its 1425 shapeless entries equal ours. The rest
+    differ in output `block_states` (257) or `nbt` (41), 26 of them in an input's `meta` too.
+  - So on those rows the control shows pmmp-core, and BDS stands alone: every creative item
+    and recipe BDS sends is one of ours, in our order. An extraction fault would show
+    entries only in the capture. There are none.
+- **Education features**, off in both BDS runs and on in pmmp-core's `StartGamePacket`.
+  Every creative item and recipe of ours that BDS leaves out, outside the next point, names
+  an Education Edition item: elements, compounds, chemistry tables, `bleach`, hard glass,
+  glow sticks. Consistent with the setting, not confirmed: no BDS run with it on exists, and
+  the control cannot confirm it, since pmmp-core rebuilds creative and recipes from ours.
+- **Ice content, not explained.** Ours has `ice_ball`, `icicle`, `ice_crystal`,
+  `frostbite` and its spawn egg, potions 47 and 48 (47 is brewed from `ice_ball`), arrows 48
+  and 49, and the `ice_caves` biome. BDS leaves all of them out of creative, recipes, biomes
+  and actors. Its item table has no `ice_ball` and gives `icicle` and `ice_crystal` the
+  non-component IDs -1247 and -1248, so 32 items sit 3 lower. Both runs had no experiment
+  on, and what brings this content in is unknown.
+- **Order, not explained.** `entity_identifiers.nbt` and `jigsaw_structures_data.nbt` hold
+  the entries ours holds, equal entry for entry, apart from `frostbite`, in another order.
+  A scratch decode of both NBT trees outside the repository found this; the tool compares
+  their sha256.
+
 ## Decision
 
 | File | Source | Measured |
 |---|---|---|
 | `canonical_block_states.nbt` | neither: samples MISMATCH, missing 14 blocks with no stated reason and giving no state order; Script API MISMATCH, 39 extra states, 18 missing, no order or `version`; packets carry only the data-driven blocks and a checksum (ADR 001). Back to the steward before #5 | samples and Script API, above |
-| `required_item_list.json` | BDS packets, `ItemRegistryPacket`; samples MISMATCH, a subset whose 1627 IDs agree | samples, above; packets PR 3 |
-| `data_driven_blocks.nbt` | BDS packets, `StartGamePacket` | PR 3 |
-| `creative/construction.json` | BDS packets, `CreativeContentPacket` | PR 3 |
-| `creative/equipment.json` | BDS packets, `CreativeContentPacket` | PR 3 |
-| `creative/items.json` | BDS packets, `CreativeContentPacket` | PR 3 |
-| `creative/nature.json` | BDS packets, `CreativeContentPacket` | PR 3 |
-| `recipes/potion_container_change.json` | BDS packets, `CraftingDataPacket` | PR 3 |
-| `recipes/potion_type.json` | BDS packets, `CraftingDataPacket` | PR 3 |
-| `recipes/shaped_crafting.json` | BDS packets, `CraftingDataPacket` | PR 3 |
-| `recipes/shaped_crafting_asymmetric.json` | BDS packets, `CraftingDataPacket` | PR 3 |
-| `recipes/shapeless_crafting.json` | BDS packets, `CraftingDataPacket` | PR 3 |
-| `recipes/shapeless_shulker_box.json` | BDS packets, `CraftingDataPacket` | PR 3 |
-| `recipes/smithing.json` | BDS packets, `CraftingDataPacket` | PR 3 |
-| `recipes/smithing_trim.json` | BDS packets, `CraftingDataPacket` | PR 3 |
-| `recipes/special_hardcoded.json` | BDS packets, `CraftingDataPacket` | PR 3 |
-| `biome_definitions.json` | BDS packets, `BiomeDefinitionListPacket` | PR 3 |
-| `entity_identifiers.nbt` | BDS packets, `AvailableActorIdentifiersPacket` | PR 3 |
-| `jigsaw_structures_data.nbt` | BDS packets, `JigsawStructureDataPacket` | PR 3 |
-| `voxel_shapes.json` | BDS packets, `VoxelShapesPacket` | PR 3 |
+| `required_item_list.json` | BDS packets, `ItemRegistryPacket`; samples MISMATCH, a subset whose 1627 IDs agree | samples, above; BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, no block IDs: MISMATCH, 41 differences, all from ice content, not explained; control MATCH |
+| `data_driven_blocks.nbt` | BDS packets, `StartGamePacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, no block IDs: MATCH; control MATCH |
+| `creative/construction.json` | BDS packets, `CreativeContentPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, block IDs by FNV-1a 32, all resolved: MISMATCH, 567 of our 686 items in our order, the 119 left out education, not confirmed; control differs as pmmp-core rebuilds it |
+| `creative/equipment.json` | BDS packets, `CreativeContentPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, block IDs by FNV-1a 32, all resolved: MISMATCH, 367 of our 370 items in our order, the 3 left out ice content, not explained; control differs as pmmp-core rebuilds it |
+| `creative/items.json` | BDS packets, `CreativeContentPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, block IDs by FNV-1a 32, all resolved: MISMATCH, 607 of our 729 items in our order, the 122 left out education, not confirmed; control differs as pmmp-core rebuilds it |
+| `creative/nature.json` | BDS packets, `CreativeContentPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, block IDs by FNV-1a 32, all resolved: MISMATCH, 439 of our 448 items in our order, the 9 left out ice content, not explained; control differs as pmmp-core rebuilds it |
+| `recipes/potion_container_change.json` | BDS packets, `CraftingDataPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, no block IDs: MATCH, 2 entries; control MATCH |
+| `recipes/potion_type.json` | BDS packets, `CraftingDataPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, no block IDs, meta by our meta map: MISMATCH, 210 of our 213 in our order, the 3 left out `ice_ball`, not explained; control differs as pmmp-core rebuilds it |
+| `recipes/shaped_crafting.json` | BDS packets, `CraftingDataPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, output block IDs by FNV-1a 32, all resolved, input meta by our meta map: MATCH, 1219 entries in order; control differs as pmmp-core rebuilds it |
+| `recipes/shaped_crafting_asymmetric.json` | BDS packets, `CraftingDataPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true: MISMATCH, none sent, all 128 of ours education, not confirmed; control sends none |
+| `recipes/shapeless_crafting.json` | BDS packets, `CraftingDataPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, output block IDs by FNV-1a 32, all resolved, input meta by our meta map: MISMATCH, 2068 of our 2128 in our order, the 60 left out education (`bleach`), not confirmed; control differs as pmmp-core rebuilds it |
+| `recipes/shapeless_shulker_box.json` | BDS packets, `CraftingDataPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, output block IDs by FNV-1a 32, all resolved, input meta by our meta map: MATCH, 1456 entries in order; control sends none |
+| `recipes/smithing.json` | BDS packets, `CraftingDataPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, output block IDs by FNV-1a 32, all resolved, input meta by our meta map: MATCH, 12 entries in order; control sends none |
+| `recipes/smithing_trim.json` | BDS packets, `CraftingDataPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, no block IDs: MATCH, 1 entry; control sends none |
+| `recipes/special_hardcoded.json` | BDS packets, `CraftingDataPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, no block IDs: MATCH, 14 entries in order; control sends none |
+| `biome_definitions.json` | BDS packets, `BiomeDefinitionListPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, no block IDs: MISMATCH, only ours has `ice_caves`, ice content, not explained; control MATCH |
+| `entity_identifiers.nbt` | BDS packets, `AvailableActorIdentifiersPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, no block IDs: MISMATCH, only ours has `frostbite`, and the other 138 stand in another order, not explained; control MATCH |
+| `jigsaw_structures_data.nbt` | BDS packets, `JigsawStructureDataPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, no block IDs: MISMATCH, our 64 pools in another order, not explained; control MATCH |
+| `voxel_shapes.json` | BDS packets, `VoxelShapesPacket` | BDS 1.26.60.6 and 1.26.63.1, NetherNet, hashes true, no block IDs: MATCH; control MATCH |
 | `protocol_info.json` | Mojang docs: protocol number and packet IDs | no |
 | `enums/ParticleType.json` | Mojang docs, read by `enums.py` | no |
 | `enums.py` | Mojang docs: the script that reads them for `enums/` | no |

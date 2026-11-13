@@ -24,7 +24,6 @@ const pkg = require('../lib/packages');
 const IMAGE = 'local-pocketmine-mp:latest';
 const AUTOLOAD = 'phar:///opt/pocketmine/PocketMine-MP.phar/vendor/autoload.php';
 const CATEGORIES = { 1: 'construction', 2: 'nature', 3: 'equipment', 4: 'items' };
-const NOT_COMPARED = ['potion_container_change', 'potion_type', 'shaped_crafting', 'shaped_crafting_asymmetric', 'shapeless_crafting', 'shapeless_shulker_box', 'smithing', 'smithing_trim', 'special_hardcoded'].map((r) => `recipes/${r}.json`);
 
 const leString = (s) => { const b = Buffer.from(s); return Buffer.concat([Buffer.from([b.length & 0xff, b.length >> 8]), b]); };
 const leTag = (t, k, payload) => Buffer.concat([Buffer.from([t]), leString(k), payload]);
@@ -74,8 +73,89 @@ function itemJson(s, resolve) {
 	return Object.keys(o).length === 1 ? s.name : o;
 }
 
+// What the generator reads for an ingredient besides the packet: our palette with
+// block_state_meta_map.json, and block_id_to_item_id_map.json to tell a block item. A name
+// with one meta in the palette gives that state for any meta, as BlockStateDictionary does.
+function metaLookup(canonical, metaMap, blockToItem) {
+	const byName = new Map();
+	canonical.forEach((s, i) => byName.set(s.name, (byName.get(s.name) || new Map()).set(metaMap[i], i)));
+	const blockItems = new Set(Object.values(blockToItem));
+	return (name, meta) => {
+		const m = blockItems.has(name) && byName.get(name);
+		const id = !m ? undefined : m.size === 1 ? m.values().next().value : m.get(meta);
+		return id === undefined ? null : canonical[id];
+	};
+}
+
+// An ingredient in the generator's form. A meta suffix on the ID that disagrees with the
+// meta stops the generator, so it is kept as a field ours never has.
+function ingredientJson(x, lookup) {
+	if (!x) return null;
+	const o = {};
+	if ('id' in x) {
+		const m = /^([^:]+:[^:]+):(\d+)$/.exec(x.id);
+		o.name = m ? m[1] : x.id;
+		if (m && Number(m[2]) !== x.meta) o.meta_suffix = m[2];
+		const state = x.meta === 32767 ? null : lookup(o.name, x.meta);
+		if (state && state.states.length) o.block_states = leStates(state.states).toString('base64');
+		else if (!state && x.meta !== 0) o.meta = x.meta;
+	} else if ('tag' in x) o.tag = x.tag;
+	else [o.molang_expression, o.molang_version] = [x.molang_expression, x.molang_version];
+	if (x.count !== 1) o.count = x.count;
+	return o;
+}
+
+const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])])) : v);
+// PHP's json_encode with no flags, which escapes slashes and every non-ASCII character.
+const phpJson = (v) => JSON.stringify(v).replace(/\//g, '\\/').replace(/[^\x00-\x7f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+const byBytes = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+// The generator's order within a file: each entry's json_encode with its keys sorted, plus a
+// letter counting its duplicates, compared byte by byte.
+function sortRecipes(entries) {
+	const seen = new Map();
+	return entries.map(sortKeys).map((e) => { const k = phpJson(e); seen.set(k, (seen.get(k) || 0) + 1); return [k + String.fromCharCode(96 + seen.get(k)), e]; }).sort(([a], [b]) => byBytes(a, b)).map(([, e]) => e);
+}
+
+// Each recipes/ file the generator would write from the packet, by its rules.
+function recipes(c, item, ing) {
+	const out = {};
+	const add = (type, e) => (out[`recipes/${type}.json`] ||= []).push(e);
+	const unlock = (r) => (r.unlocking && r.unlocking.length ? { unlockingIngredients: r.unlocking.map(ing) } : {});
+	const shaped = (r) => {
+		const keys = new Map();
+		const input = {};
+		const shape = r.input.map((row) => row.map((x) => {
+			if (!x) return ' ';
+			const j = ing(x);
+			const h = JSON.stringify(j);
+			if (!keys.has(h)) input[keys.set(h, String.fromCharCode(65 + keys.size)).get(h)] = j;
+			return keys.get(h);
+		}).join(''));
+		return { block: r.block, input, output: r.output.map(item), priority: r.priority, shape, ...unlock(r) };
+	};
+	for (const t of ['shaped_crafting', 'shaped_chemistry']) for (const r of c[t]) add(r.symmetric ? t : `${t}_asymmetric`, shaped(r));
+	for (const t of ['shapeless_crafting', 'shapeless_shulker_box', 'shapeless_chemistry']) for (const r of c[t]) add(t, { block: r.block, input: r.input.map(ing), output: r.output.map(item), priority: r.priority, ...unlock(r) });
+	for (const r of c.special_hardcoded) add('special_hardcoded', r);
+	const smithing = (r) => ({ addition: ing(r.addition), block: r.block, input: ing(r.input), template: ing(r.template) });
+	for (const r of c.smithing) add('smithing', { ...smithing(r), output: item(r.output) });
+	for (const r of c.smithing_trim) add('smithing_trim', smithing(r));
+	for (const r of c.potion_type) add('potion_type', { ingredient: ing(r.ingredient), input: ing(r.input), output: item(r.output) });
+	for (const r of c.potion_container_change) add('potion_container_change', { ingredient: ing(r.ingredient), input_item_name: r.input, output_item_name: r.output });
+	return Object.fromEntries(Object.entries(out).map(([f, es]) => [f, sortRecipes(es)]));
+}
+
+// For explanation only, never a MATCH: the entries each side has that the other lacks.
+function unmatched(got, ours) {
+	const left = new Map();
+	for (const k of ours.map((x) => phpJson(sortKeys(x)))) left.set(k, (left.get(k) || 0) + 1);
+	const extra = got.map((x) => phpJson(sortKeys(x))).filter((k) => !(left.get(k) > 0 && left.set(k, left.get(k) - 1)));
+	const missing = [...left].filter(([, n]) => n > 0);
+	return `entries: capture ${got.length}, ours ${ours.length}; ${extra.length} only in the capture, ${missing.reduce((n, [, c]) => n + c, 0)} only in ours${extra.length ? `, first ${extra[0].slice(0, 120)}` : ''}${missing.length ? `; first of ours ${missing[0][0].slice(0, 120)}` : ''}`;
+}
+
 // Each file's packet and the value derived from the dump: JSON, or a sha256 for an NBT file.
-function derive(d, blocks) {
+function derive(d, blocks, ours = { recipes: [], lookup: () => null }) {
 	const rows = {
 		'required_item_list.json': ['ItemRegistryPacket', d.items && Object.fromEntries(d.items.map((e) => [e.name, { runtime_id: e.runtime_id, component_based: e.component_based, version: e.version, ...(e.component_nbt ? { component_nbt: e.component_nbt } : {}) }]))],
 		'data_driven_blocks.nbt': ['StartGamePacket', d.start_game && d.start_game.data_driven_blocks],
@@ -87,7 +167,9 @@ function derive(d, blocks) {
 	for (const c of Object.values(CATEGORIES)) rows[`creative/${c}.json`] = ['CreativeContentPacket', d.creative && []];
 	const item = (s) => itemJson(s, (id, name) => blocks.resolve(id, 'CreativeContentPacket', name));
 	if (d.creative) d.creative.groups.forEach((g, i) => (rows[`creative/${CATEGORIES[g.category] || `category ${g.category}`}.json`] ||= ['CreativeContentPacket', []])[1].push({ group_icon: item(g.icon), group_name: g.name, items: d.creative.items.filter((x) => x.group === i).map((x) => item(x.item)) }));
-	if (d.crafting) d.crafting.outputs.forEach((s) => s && blocks.resolve(s.block, 'CraftingDataPacket', s.name));
+	// A recipe file only one side has is a MISMATCH: absent from ours, or empty in the capture.
+	const got = d.crafting && recipes(d.crafting, (s) => itemJson(s, (id, name) => blocks.resolve(id, 'CraftingDataPacket', name)), (x) => ingredientJson(x, ours.lookup));
+	for (const f of [...new Set([...ours.recipes, ...Object.keys(got || {})])].sort()) rows[f] = ['CraftingDataPacket', got && (got[f] || [])];
 	return rows;
 }
 
@@ -113,13 +195,15 @@ function leftOut(got, ours) {
 function compare(d, dataDir) {
 	const canonical = samples.readStateList(fs.readFileSync(path.join(dataDir, 'canonical_block_states.nbt')));
 	const blocks = resolver(d.start_game ? d.start_game.hashes : null, canonical);
-	const rows = Object.entries(derive(d, blocks)).map(([file, [packet, got]]) => {
+	const json = (f) => JSON.parse(fs.readFileSync(path.join(dataDir, f), 'utf8'));
+	const ours = { recipes: fs.readdirSync(path.join(dataDir, 'recipes')).filter((f) => f.endsWith('.json')).map((f) => `recipes/${f}`), lookup: metaLookup(canonical, json('block_state_meta_map.json'), json('block_id_to_item_id_map.json')) };
+	const rows = Object.entries(derive(d, blocks, ours)).map(([file, [packet, got]]) => {
 		const p = path.join(dataDir, file);
 		if (got === undefined || got === null) return { file, packet, diffs: [`${packet} is not in the capture`] };
 		if (!fs.existsSync(p)) return { file, packet, diffs: ['not in packages/bedrock-data'] };
 		const ours = file.endsWith('.nbt') ? crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex') : JSON.parse(fs.readFileSync(p, 'utf8'));
 		if (typeof ours === 'string') return { file, packet, diffs: got === ours ? [] : [`sha256 capture ${got}, ours ${ours}`] };
-		return { file, packet, diffs: diff(got, ours, '', []), note: file.startsWith('creative/') ? leftOut(got, ours) : null };
+		return { file, packet, diffs: diff(got, ours, '', []), note: file.startsWith('creative/') ? leftOut(got, ours) : file.startsWith('recipes/') ? unmatched(got, ours) : null };
 	});
 	if (!d.start_game) rows.push({ file: 'block network IDs', packet: 'StartGamePacket', diffs: ['no StartGamePacket, so no rule for them is known'] });
 	if (!d.crafting) rows.push({ file: 'block network IDs', packet: 'CraftingDataPacket', diffs: ['CraftingDataPacket is not in the capture, so its block network IDs are not accounted for'] });
@@ -138,7 +222,7 @@ function render(r, header, d) {
 		lines.push(!sent[p] ? `  ${p}: not in the capture` : `  ${p}: ${ids.length} IDs, ${ids.length - bad.length} became states of the item's own block, ${bad.length} did not${bad.length ? `: ${[...new Set(bad)].slice(0, 20).join(', ')}` : ''}`);
 	}
 	for (const x of r.rows) lines.push(`${x.diffs.length ? 'MISMATCH' : 'MATCH'} ${x.file} (${x.packet})${x.diffs.length ? `: ${x.diffs.length} differences` : ''}`, ...x.diffs.slice(0, 8).map((s) => `    ${s}`), ...(x.diffs.length && x.note ? [`  ${x.note}`] : []));
-	return [...lines, `not compared: ${NOT_COMPARED.join(', ')} (CraftingDataPacket)`, r.match ? 'MATCH' : 'MISMATCH'].join('\n');
+	return [...lines, r.match ? 'MATCH' : 'MISMATCH'].join('\n');
 }
 
 function dockerArgs(capture, image) {
@@ -182,4 +266,4 @@ if (require.main === module) {
 	try { process.exitCode = main(process.argv.slice(2)); } catch (e) { process.stderr.write(`bds decode: ${e.message}\n`); process.exitCode = 2; }
 }
 
-module.exports = { IMAGE, AUTOLOAD, NOT_COMPARED, leStates, fnv1a32, blockHash, resolver, itemJson, derive, diff, leftOut, compare, dockerArgs, parseArgs, main };
+module.exports = { IMAGE, AUTOLOAD, leStates, fnv1a32, blockHash, resolver, itemJson, metaLookup, ingredientJson, phpJson, sortRecipes, recipes, unmatched, derive, diff, leftOut, compare, dockerArgs, parseArgs, main };

@@ -64,8 +64,15 @@ Spike issue pmmp-updater#56 settles what replaces it, after the import's live ru
      refusal. `support/analyzeHeadless` and
      `Ghidra/Features/Decompiler/os/linux_x86_64/decompile` are regular files with the
      owner exec bit, because a zip without Unix modes falls back to `0o644`
-     (`unzip.js:49`). `support/analyzeHeadless` has no uncommented `MAXMEM=` line, so
-     item 4's environment value is the one used.
+     (`unzip.js:49`). `support/analyzeHeadless` has exactly one uncommented line that
+     assigns `GHIDRA_HEADLESS_MAXMEM`, counting any leading whitespace and a leading
+     `export`, `declare` or `readonly` with any options, and that line begins
+     `GHIDRA_HEADLESS_MAXMEM=${GHIDRA_HEADLESS_MAXMEM:=`, so a value set from outside
+     wins and nothing later replaces it. It has an uncommented line that runs `launch.sh`
+     with `"${GHIDRA_HEADLESS_MAXMEM}"` as the fourth word after `launch.sh`, its heap
+     argument, so that value is the heap the JVM gets (12.1.4's lines 17 and 43, item
+     4). A release that renames, fixes, reassigns, moves or stops passing that variable
+     fails here instead of running on another heap.
    - `docker build --network none --iidfile` with the staging directory as context and a
      `Dockerfile` `FROM` the digest holding only `COPY` and `ENV`, so no build step runs
      code and none needs a limit. The image carries Node, the JDK and Ghidra. The
@@ -74,17 +81,31 @@ Spike issue pmmp-updater#56 settles what replaces it, after the import's live ru
      iidfile, never pushed.
 4. **The run, inside the PC cap.** Every container in this ADR, `unpack` and `import`,
    is named `riftal_smoke_ghidra_<step>_<pid>` and runs with `--rm --init --network none
-   -m 2g --cpus 2 --user <uid>:<gid> -e HOME=/tmp -e MAXMEM=1400M`, no `-p`, under
-   `timeout --kill-after=10 3600`, and is removed by name on every exit path as
-   `record.js:170` does. `analyzeHeadless` gets `-max-cpu 2`. Ghidra's own settings and
-   compiled scripts go to `/tmp` and die with the container.
-   - **Heap.** `MAXMEM` is `analyzeHeadless`'s setting and becomes the JVM's `-Xmx`.
-     Unset, the JVM takes about a quarter of the limit. 1400M leaves about 650 MiB of the
-     2048 MiB for what the heap does not hold: metaspace and the code cache for Ghidra's
-     classes, thread stacks, and page cache charged to the container. Every
-     `analyzeHeadless` call, the import included, passes `-scriptPath /tool/scripts
-     -preScript Heap.java`, and `tools/ghidra/scripts/Heap.java` only prints
-     `Runtime.getRuntime().maxMemory()`, so each run's log shows it took.
+   -m 2g --cpus 2 --user <uid>:<gid> -e HOME=/tmp -e GHIDRA_HEADLESS_MAXMEM=1400M`, no
+   `-p`, under `timeout --kill-after=10 3600`, and is removed by name on every exit path
+   as `record.js:170` does. `analyzeHeadless` gets `-max-cpu 2`. Ghidra's own settings
+   and compiled scripts go to `/tmp` and die with the container.
+   - **Heap.** Ghidra 12.1.4's `support/analyzeHeadless` (release zip
+     `ghidra_12.1.4_PUBLIC_20260921.zip`) reads no `MAXMEM`. It sets `MAXMEM_DEFAULT=2G`
+     (line 11), takes `GHIDRA_MAXMEM` from the environment or that default (line 16),
+     takes `GHIDRA_HEADLESS_MAXMEM` from the environment or `GHIDRA_MAXMEM` (line 17),
+     and passes `GHIDRA_HEADLESS_MAXMEM` to `launch.sh` as its fourth argument (line
+     43). `support/launch.sh` sets its own `MAXMEM` from that argument (lines 71-72) and
+     gives the JVM `-Xmx${MAXMEM}` (lines 192-193). Unset, the
+     JVM gets 2G, the whole container. `GHIDRA_HEADLESS_MAXMEM=1400M` is the one heap
+     setting. `GHIDRA_MAXMEM` is not set: line 17 reads it only when
+     `GHIDRA_HEADLESS_MAXMEM` is unset, so it would be a second value with no effect.
+     `GHIDRA_JAVA_OPTIONS` and `GHIDRA_HEADLESS_JAVA_OPTIONS` go into the JVM's
+     arguments (lines 22 and 25), and the JVM reads `JAVA_TOOL_OPTIONS` and
+     `_JAVA_OPTIONS` itself, `_JAVA_OPTIONS` over the command line, so any of the four
+     could carry a second `-Xmx`. No container is given any of them, and the image's
+     `ENV`, the base digest's included, sets none of these six variables. 12.1.4's
+     `support/launch.properties` sets no `-Xmx` in its `VMARGS` lines. 1400M leaves
+     about 650 MiB of the 2048 MiB for what the heap does not hold: metaspace and the
+     code cache for Ghidra's classes, thread stacks, and page cache charged to the
+     container. Every `analyzeHeadless` call, the import included, passes `-scriptPath
+     /tool/scripts -preScript Heap.java`, and `tools/ghidra/scripts/Heap.java` only
+     prints `Runtime.getRuntime().maxMemory()`, so each run's log shows it took.
    - **No auto-analysis.** The import is `-import ... -noanalysis` (item 5), so there is
      no analyzer set to pass.
    - **Timeout.** 3600 s per container. An import with no analysis is far below that, so
@@ -143,13 +164,18 @@ Spike issue pmmp-updater#56 settles what replaces it, after the import's live ru
    - `unpack.sh` is tested as `tools/bds/test/run.test.js` tests `run.sh`, under bash
      with stubbed commands on fixture trees, skipped on win32. Each refusal exits
      non-zero on its own fixture: `unzip.js` reporting 65535 entries, `analyzeHeadless`
-     or `decompile` without the owner exec bit, and an uncommented `MAXMEM=` line. A
-     fixture whose only `MAXMEM=` is commented passes.
+     or `decompile` without the owner exec bit, an `analyzeHeadless` whose
+     `GHIDRA_HEADLESS_MAXMEM=` line is commented out or assigns a fixed value, one with
+     that line intact and a later `GHIDRA_HEADLESS_MAXMEM=2G`, one with it intact and a
+     later indented `export GHIDRA_HEADLESS_MAXMEM=2G`, and one whose `launch.sh` line
+     passes no `"${GHIDRA_HEADLESS_MAXMEM}"` or passes it as other than the fourth
+     word. A fixture written in the shape of 12.1.4's lines 11 to 17 and 43 passes.
    - The Build ID reader is tested on a hand-built ELF note. `analyze.js` is tested as
      `inspect.test.js` tests `dockerArgs`, and through a fake `--docker` command, as
-     `record.js` accepts: item 4's flags, `MAXMEM=1400M` and the timeout on every
-     container, the headroom refusals, and item 5's exits, with exit 3 reported and
-     nothing renamed, any other non-zero exit removing staging, and exit 0 renaming into
+     `record.js` accepts: item 4's flags, `GHIDRA_HEADLESS_MAXMEM=1400M` and the timeout
+     on every container, none of item 4's other five heap variables on any, the
+     headroom refusals, and item 5's exits, with exit 3 reported and nothing renamed,
+     any other non-zero exit removing staging, and exit 0 renaming into
      `projects/<build-id>/base` and never over an existing one. `tools/**/*.test.js`
      already runs them, so `ci.yml`, a steward path, is unchanged.
    - `Heap.java` is not covered by CI, which has no Ghidra and no JDK
@@ -172,9 +198,9 @@ Spike issue pmmp-updater#56 settles what replaces it, after the import's live ru
 - **Import without analysis.** Full auto-analysis of a binary this size is what does
   not fit 2 GiB. It also makes a project cheap to rebuild, which makes item 5's
   throw-away-on-failure rule affordable.
-- **A fixed heap, logged by every call.** With the default, the JVM sizes the heap, and
-  a heap error would look like a limit problem when it is a setting. `Heap.java` on the
-  import lets the import PR's live run show the setting took.
+- **A fixed heap, logged by every call.** With 12.1.4's default the heap is 2G, the
+  whole container, so an OOM kill would look like a limit problem when it is a setting.
+  `Heap.java` on the import lets the import PR's live run show the setting took.
 - **An image over unpacking at run time.** The ruling says an image. Built by copying a
   tree that was hash-checked and unpacked under the cap, with `--network none`, it adds
   no source a run could fetch from and no step a limit has to cover.
@@ -196,6 +222,12 @@ Spike issue pmmp-updater#56 settles what replaces it, after the import's live ru
 - **Full auto-analysis, at any limit.** Hours of work, and it does not fit the PC cap.
 - **A reduced analyzer set.** Disassembly and function-start search still walk all of
   `.text`, which grows with the binary, and the analyzer names are Ghidra's to change.
+- **`-e MAXMEM=1400M`.** 12.1.4's `support/analyzeHeadless` never reads it (lines 11 to
+  17 and 43), and `support/launch.sh` sets its own `MAXMEM` from its fourth argument
+  (lines 71-72) over any value in the environment, so the import would run on the 2G
+  default.
+- **Setting `GHIDRA_MAXMEM` as well.** Line 17 reads it only when
+  `GHIDRA_HEADLESS_MAXMEM` is unset, so it would be a second value that changes nothing.
 - **Deciding slot identification, labelling or the skill in this ADR.** Moved to #56 by
   the steward's replan on PR #55, ahead of the evidence the import's live run gives.
 - **Granting an exception to the PC cap in this ADR.** An ADR merged by the approver

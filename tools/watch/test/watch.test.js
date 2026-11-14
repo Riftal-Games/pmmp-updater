@@ -61,12 +61,11 @@ const ISSUE_10 = {
 	labels: [{ name: 'owner:updater' }, { name: 'route:steward' }, { name: 'M1' }, { name: 'prep' }],
 };
 
-// A fake GitHub REST API that keeps issues and comments in memory and records every
-// call by the gh verb it stands for, so a test can tell reads from writes and a second
-// run sees what the first one wrote. Lists come back two to a page, linked by rel="next".
-const PAGE = 2;
-
+// A fake GitHub REST API that keeps issues and comments in memory and records each call
+// as its method and path, so a test can tell reads from writes and a second run sees
+// what the first one wrote. Lists come back two to a page, linked by rel="next".
 function fakeGh(issues) {
+	const PAGE = 2;
 	const state = { issues: issues.map((i) => ({ ...i, comments: [...(i.comments || [])] })), calls: [], auth: [] };
 	const reply = (status, data, headers = {}) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', ...headers } });
 	const paged = (u, items) => {
@@ -84,15 +83,15 @@ function fakeGh(issues) {
 		const m = /^\/repos\/x\/y\/issues(?:\/(\d+)\/(comments|labels))?$/.exec(u.pathname);
 		if (!m || u.origin !== 'https://api.github.com') throw new Error(`unexpected ${method} ${url}`);
 		const issue = state.issues.find((i) => i.number === Number(m[1]));
-		const verb = { 'GET ': 'list', 'GET comments': 'view', 'POST comments': 'comment', 'POST labels': 'edit', 'POST ': 'create' }[`${method} ${m[2] || ''}`];
-		state.calls.push(`issue ${verb}`);
-		if (verb === 'list') return paged(u, state.issues.map(({ comments, ...i }) => ({ ...i, state: i.state.toLowerCase() })));
-		if (verb === 'view') return paged(u, issue.comments.map((b) => ({ body: b })));
-		if (verb === 'comment') {
+		const route = `${method} ${m[2] || 'issues'}`;
+		state.calls.push(`${method} ${u.pathname}`);
+		if (route === 'GET issues') return paged(u, state.issues.map(({ comments, ...i }) => ({ ...i, state: i.state.toLowerCase() })));
+		if (route === 'GET comments') return paged(u, issue.comments.map((b) => ({ body: b })));
+		if (route === 'POST comments') {
 			issue.comments.push(body.body);
 			return reply(201, { html_url: `https://github.com/x/y/issues/${issue.number}#issuecomment-1` });
 		}
-		if (verb === 'edit') {
+		if (route === 'POST labels') {
 			issue.labels.push(...body.labels.map((name) => ({ name })));
 			return reply(200, issue.labels);
 		}
@@ -100,7 +99,7 @@ function fakeGh(issues) {
 		state.issues.push({ number, state: 'OPEN', title: body.title, body: body.body, labels: body.labels.map((name) => ({ name })), comments: [] });
 		return reply(201, { number, html_url: `https://github.com/x/y/issues/${number}` });
 	};
-	state.writes = () => state.calls.filter((c) => !['issue list', 'issue view'].includes(c));
+	state.writes = () => state.calls.filter((c) => !c.startsWith('GET '));
 	return state;
 }
 
@@ -168,7 +167,7 @@ test('a newer preview comments on the open issue once, and the second run report
 
 	const second = await runWatch({ tags, bds, gh });
 	assert.match(second.out, /^NOTHING 1\.26\.70: v1\.26\.70-preview\.23, BDS 1\.26\.70\.23 already on #10$/m);
-	assert.deepEqual(gh.writes(), ['issue comment'], 'one comment over both runs');
+	assert.deepEqual(gh.writes(), ['POST /repos/x/y/issues/10/comments'], 'one comment over both runs');
 });
 
 test('a version with no issue is filed once with the preview labels, protocol and scope', async () => {
@@ -184,7 +183,7 @@ test('a version with no issue is filed once with the preview labels, protocol an
 
 	const second = await runWatch({ tags, bds: TODAY_BDS, gh });
 	assert.match(second.out, /^NOTHING 1\.26\.80: v1\.26\.80-preview\.20 already on #11$/m);
-	assert.deepEqual(gh.writes(), ['issue create']);
+	assert.deepEqual(gh.writes(), ['POST /repos/x/y/issues']);
 });
 
 test('the release comments on the open preview issue and adds critical-path', async () => {
@@ -194,7 +193,7 @@ test('the release comments on the open preview issue and adds critical-path', as
 	assert.match(out, /^COMMENT #10 \(1\.26\.70\): v1\.26\.70, add label critical-path$/m);
 	assert.match(gh.issues[0].comments[0], /Bedrock 1\.26\.70 is released/);
 	assert.ok(gh.issues[0].labels.some((l) => l.name === 'critical-path'));
-	assert.deepEqual(gh.writes(), ['issue comment', 'issue edit']);
+	assert.deepEqual(gh.writes(), ['POST /repos/x/y/issues/10/comments', 'POST /repos/x/y/issues/10/labels']);
 });
 
 test('a release with no issue is filed with critical-path', async () => {
@@ -217,7 +216,7 @@ test('a BDS build ahead of the docs is filed, and its docs tag comments with the
 	const docsLand = await runWatch({ tags: [...TODAY_TAGS, 'v1.26.80-preview.21'], bds, gh });
 	assert.match(docsLand.out, /^COMMENT #11 \(1\.26\.80\): v1\.26\.80-preview\.21$/m);
 	assert.match(gh.issues[1].comments[0], /\*\*protocol 2251\*\*/);
-	assert.deepEqual(gh.writes(), ['issue create', 'issue comment']);
+	assert.deepEqual(gh.writes(), ['POST /repos/x/y/issues', 'POST /repos/x/y/issues/11/comments']);
 });
 
 test('issues match a version by its whole number or by marker, and closed issues still cover their tags', () => {
@@ -238,7 +237,7 @@ test('a closed issue that does not cover the new tag leads to a new issue, not a
 	const gh = fakeGh([closed]);
 	const { out } = await runWatch({ tags: [...TODAY_TAGS, 'v1.26.70-preview.23'], bds: TODAY_BDS, gh });
 	assert.match(out, /^FILE "Bedrock 1\.26\.70 \(protocol 2240\)/m);
-	assert.deepEqual(gh.writes(), ['issue create']);
+	assert.deepEqual(gh.writes(), ['POST /repos/x/y/issues']);
 });
 
 test('nothing newer than our packages asks GitHub nothing', async () => {
@@ -282,7 +281,7 @@ test('lists every page of issues and leaves out pull requests', async () => {
 	const issues = await watch.github({ repo: 'x/y', token: 't', fetch: gh.fetch }).listIssues();
 	assert.deepEqual(issues.map((i) => i.number), [1, 2, 3, 4, 5]);
 	assert.deepEqual(issues[1], { number: 2, title: 't2', state: 'CLOSED', body: '', labels: [{ name: 'owner:updater' }, { name: 'M1' }] });
-	assert.deepEqual(gh.calls, ['issue list', 'issue list', 'issue list']);
+	assert.deepEqual(gh.calls, Array(3).fill('GET /repos/x/y/issues'));
 });
 
 test('a missing GH_TOKEN fails with a message naming it, before any request', async () => {
@@ -300,6 +299,32 @@ test('a GitHub API failure names the request and the reason', async () => {
 	await assert.rejects(watch.github({ repo: 'x/y', token: 't', fetch: offline }).listIssues(), {
 		message: 'GitHub API GET /repos/x/y/issues?state=all&per_page=100: fetch failed (getaddrinfo ENOTFOUND api.github.com)',
 	});
+});
+
+test('a 2xx reply that is not JSON, or a page that is not a list, names the request', async () => {
+	const html = async () => new Response('<html>busy</html>', { status: 200 });
+	await assert.rejects(watch.github({ repo: 'x/y', token: 't', fetch: html }).comment(10, 'x'), {
+		message: 'GitHub API POST /repos/x/y/issues/10/comments: the HTTP 200 reply is not JSON',
+	});
+	const object = async () => new Response(JSON.stringify({ message: 'x' }), { status: 200 });
+	await assert.rejects(watch.github({ repo: 'x/y', token: 't', fetch: object }).listIssues(), {
+		message: 'GitHub API GET /repos/x/y/issues?state=all&per_page=100: the reply is not a list',
+	});
+});
+
+test('a next page off the API host fails before the token is sent to it', async () => {
+	for (const host of ['https://elsewhere.example', 'https://api.github.com.elsewhere.example']) {
+		const origins = [];
+		const linked = async (url) => {
+			origins.push(new URL(url).origin);
+			if (origins.length > 2) throw new Error('followed the link off the API host');
+			return new Response('[]', { status: 200, headers: { link: `<${host}/repos/x/y/issues?page=2>; rel="next"` } });
+		};
+		await assert.rejects(watch.github({ repo: 'x/y', token: 't', fetch: linked }).listIssues(), {
+			message: `GitHub API GET /repos/x/y/issues?state=all&per_page=100: the next page is not on https://api.github.com: ${host}/repos/x/y/issues?page=2`,
+		});
+		assert.deepEqual(origins, ['https://api.github.com']);
+	}
 });
 
 test('a tool missing from the PATH fails the run with a message naming it, not a bare ENOENT', () => {

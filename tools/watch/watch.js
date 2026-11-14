@@ -23,6 +23,7 @@ const BDS_CHANNELS = { serverBedrockLinux: 'release', serverBedrockPreviewLinux:
 const PREVIEW_LABELS = ['owner:updater', 'route:steward', 'M1', 'prep'];
 const RELEASE_LABEL = 'critical-path';
 const DEFAULT_API_URL = 'https://api.github.com';
+const TIMEOUT_MS = 30000;
 
 function parseArgs(argv) {
 	const a = { dry_run: false, repo: process.env.GITHUB_REPOSITORY || DEFAULT_REPO };
@@ -66,13 +67,13 @@ function parseBdsLinks(json) {
 }
 
 async function fetchBdsLinks() {
-	const res = await fetch(BDS_LINKS_URL, { signal: AbortSignal.timeout(30000), headers: { accept: 'application/json' } });
+	const res = await fetch(BDS_LINKS_URL, { signal: AbortSignal.timeout(TIMEOUT_MS), headers: { accept: 'application/json' } });
 	if (!res.ok) throw new Error(`BDS links: HTTP ${res.status}`);
 	return parseBdsLinks(await res.json());
 }
 
-// GitHub's REST API through fetch, so the watch needs no gh binary on the runner, only
-// the job's GH_TOKEN. The issues endpoint also lists pull requests, which are dropped.
+// GitHub's REST API through fetch, which needs only the job's GH_TOKEN. The issues
+// endpoint also lists pull requests, which are dropped.
 function github({ repo, token, fetch: fetchImpl = fetch, apiUrl = DEFAULT_API_URL }) {
 	async function call(method, url, body) {
 		if (!token) throw new Error('GH_TOKEN is not set. The watch reads and writes issues through the GitHub REST API with it; in Actions, pass GH_TOKEN: ${{ github.token }} to the step.');
@@ -81,7 +82,7 @@ function github({ repo, token, fetch: fetchImpl = fetch, apiUrl = DEFAULT_API_UR
 		try {
 			res = await fetchImpl(url, {
 				method,
-				signal: AbortSignal.timeout(30000),
+				signal: AbortSignal.timeout(TIMEOUT_MS),
 				headers: { accept: 'application/vnd.github+json', authorization: `Bearer ${token}`, 'x-github-api-version': '2022-11-28', 'content-type': 'application/json' },
 				body: body === undefined ? undefined : JSON.stringify(body),
 			});
@@ -96,13 +97,23 @@ function github({ repo, token, fetch: fetchImpl = fetch, apiUrl = DEFAULT_API_UR
 			} catch {}
 			throw new Error(`${where}: HTTP ${res.status} ${message}`.trim());
 		}
-		const next = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('link') || '');
-		return { data: text ? JSON.parse(text) : null, next: next ? next[1] : null };
+		let data = null;
+		try {
+			data = text ? JSON.parse(text) : null;
+		} catch {
+			throw new Error(`${where}: the HTTP ${res.status} reply is not JSON`);
+		}
+		const link = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('link') || '');
+		const next = link ? link[1] : null;
+		// The next request carries the token, so it goes nowhere but the API host.
+		if (next && !next.startsWith(`${apiUrl}/`)) throw new Error(`${where}: the next page is not on ${apiUrl}: ${next}`);
+		return { data, next, where };
 	}
 	async function all(path) {
 		const out = [];
 		for (let url = `${apiUrl}${path}`; url;) {
 			const page = await call('GET', url);
+			if (!Array.isArray(page.data)) throw new Error(`${page.where}: the reply is not a list`);
 			out.push(...page.data);
 			url = page.next;
 		}

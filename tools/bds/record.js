@@ -220,4 +220,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { SECONDS, NODE, nodeTarball, lockProblems, npmTarballs, dockerArgs, main };
+module.exports = { SECONDS, NODE, pinnedFile, nodeTarball, lockProblems, npmTarballs, dockerArgs, trapSignals, timed, main };

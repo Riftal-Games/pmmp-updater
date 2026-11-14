@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('path');
+const { spawnSync } = require('child_process');
 const docs = require('../../lib/mojang-docs');
 const fx = require('../../test-support/fixtures');
 const watch = require('../watch');
@@ -59,32 +61,44 @@ const ISSUE_10 = {
 	labels: [{ name: 'owner:updater' }, { name: 'route:steward' }, { name: 'M1' }, { name: 'prep' }],
 };
 
-// A fake gh that keeps issues and comments in memory and records every call, so a test
-// can tell reads from writes and a second run sees what the first one wrote.
+// A fake GitHub REST API that keeps issues and comments in memory and records every
+// call by the gh verb it stands for, so a test can tell reads from writes and a second
+// run sees what the first one wrote. Lists come back two to a page, linked by rel="next".
+const PAGE = 2;
+
 function fakeGh(issues) {
-	const state = { issues: issues.map((i) => ({ ...i, comments: [...(i.comments || [])] })), calls: [] };
-	state.gh = (args, input) => {
-		state.calls.push(args.slice(0, 2).join(' '));
-		const [noun, verb] = args;
-		const n = Number(args[2]);
-		const find = () => state.issues.find((i) => i.number === n);
-		if (noun === 'issue' && verb === 'list') return JSON.stringify(state.issues.map(({ comments, ...i }) => i));
-		if (noun === 'issue' && verb === 'view') return JSON.stringify({ comments: find().comments.map((body) => ({ body })) });
-		if (noun === 'issue' && verb === 'comment') {
-			find().comments.push(input);
-			return `https://github.com/x/y/issues/${n}#issuecomment-1\n`;
+	const state = { issues: issues.map((i) => ({ ...i, comments: [...(i.comments || [])] })), calls: [], auth: [] };
+	const reply = (status, data, headers = {}) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', ...headers } });
+	const paged = (u, items) => {
+		const page = Number(u.searchParams.get('page') || 1);
+		const next = new URL(u);
+		next.searchParams.set('page', String(page + 1));
+		const more = items.length > page * PAGE;
+		return reply(200, items.slice((page - 1) * PAGE, page * PAGE), more ? { link: `<${next}>; rel="next"` } : {});
+	};
+	state.fetch = async (url, init = {}) => {
+		const u = new URL(url);
+		const method = init.method || 'GET';
+		const body = init.body === undefined ? null : JSON.parse(init.body);
+		state.auth.push(init.headers.authorization);
+		const m = /^\/repos\/x\/y\/issues(?:\/(\d+)\/(comments|labels))?$/.exec(u.pathname);
+		if (!m || u.origin !== 'https://api.github.com') throw new Error(`unexpected ${method} ${url}`);
+		const issue = state.issues.find((i) => i.number === Number(m[1]));
+		const verb = { 'GET ': 'list', 'GET comments': 'view', 'POST comments': 'comment', 'POST labels': 'edit', 'POST ': 'create' }[`${method} ${m[2] || ''}`];
+		state.calls.push(`issue ${verb}`);
+		if (verb === 'list') return paged(u, state.issues.map(({ comments, ...i }) => ({ ...i, state: i.state.toLowerCase() })));
+		if (verb === 'view') return paged(u, issue.comments.map((b) => ({ body: b })));
+		if (verb === 'comment') {
+			issue.comments.push(body.body);
+			return reply(201, { html_url: `https://github.com/x/y/issues/${issue.number}#issuecomment-1` });
 		}
-		if (noun === 'issue' && verb === 'edit') {
-			find().labels.push({ name: args[args.indexOf('--add-label') + 1] });
-			return '';
+		if (verb === 'edit') {
+			issue.labels.push(...body.labels.map((name) => ({ name })));
+			return reply(200, issue.labels);
 		}
-		if (noun === 'issue' && verb === 'create') {
-			const number = Math.max(0, ...state.issues.map((i) => i.number)) + 1;
-			const labels = args.flatMap((a, i) => (args[i - 1] === '--label' ? [{ name: a }] : []));
-			state.issues.push({ number, state: 'OPEN', title: args[args.indexOf('--title') + 1], body: input, labels, comments: [] });
-			return `https://github.com/x/y/issues/${number}\n`;
-		}
-		throw new Error(`unexpected gh ${args.join(' ')}`);
+		const number = Math.max(0, ...state.issues.map((i) => i.number)) + 1;
+		state.issues.push({ number, state: 'OPEN', title: body.title, body: body.body, labels: body.labels.map((name) => ({ name })), comments: [] });
+		return reply(201, { number, html_url: `https://github.com/x/y/issues/${number}` });
 	};
 	state.writes = () => state.calls.filter((c) => !['issue list', 'issue view'].includes(c));
 	return state;
@@ -94,7 +108,8 @@ async function runWatch({ tags, bds, gh, dryRun = false, fetchBds }) {
 	const dirs = fixtureDocs();
 	const out = [];
 	const code = await watch.main([...(dryRun ? ['--dry-run'] : []), '--repo', 'x/y', '--packages-src', packagesFixture()], {
-		gh: gh.gh,
+		fetch: gh.fetch,
+		token: 'test-token',
 		listTags: () => tagList(tags),
 		fetchBds: fetchBds || (async () => watch.parseBdsLinks(bds)),
 		checkout: (tag) => {
@@ -244,6 +259,56 @@ test('an unreachable BDS links API still checks the docs, then fails the run', a
 test('rejects a repository argument that is not owner/name', () => {
 	assert.throws(() => watch.parseArgs(['--repo', 'x/y; rm -rf /']), /not a repository name/);
 	assert.throws(() => watch.parseArgs(['--bogus']), /unknown argument/);
+});
+
+test('files through the GitHub REST API with GH_TOKEN and needs no gh binary on the PATH', async () => {
+	const gh = fakeGh([ISSUE_10]);
+	const saved = process.env.PATH;
+	process.env.PATH = fx.tempDir('watch-empty-path');
+	let run;
+	try {
+		run = await runWatch({ tags: [...TODAY_TAGS, 'v1.26.70-preview.23'], bds: TODAY_BDS, gh });
+	} finally {
+		process.env.PATH = saved;
+	}
+	assert.equal(run.code, 0);
+	assert.match(run.out, /^COMMENTED https:\/\/github\.com\/x\/y\/issues\/10#issuecomment-1$/m);
+	assert.ok(gh.auth.length > 0 && gh.auth.every((a) => a === 'Bearer test-token'));
+});
+
+test('lists every page of issues and leaves out pull requests', async () => {
+	const pr = { number: 6, state: 'OPEN', title: 'Bedrock 1.26.70 packets', body: '', labels: [], pull_request: {} };
+	const gh = fakeGh([1, 2, 3, 4, 5].map((n) => ({ number: n, state: n === 2 ? 'CLOSED' : 'OPEN', title: `t${n}`, body: null, labels: ['owner:updater', { name: 'M1' }] })).concat([pr]));
+	const issues = await watch.github({ repo: 'x/y', token: 't', fetch: gh.fetch }).listIssues();
+	assert.deepEqual(issues.map((i) => i.number), [1, 2, 3, 4, 5]);
+	assert.deepEqual(issues[1], { number: 2, title: 't2', state: 'CLOSED', body: '', labels: [{ name: 'owner:updater' }, { name: 'M1' }] });
+	assert.deepEqual(gh.calls, ['issue list', 'issue list', 'issue list']);
+});
+
+test('a missing GH_TOKEN fails with a message naming it, before any request', async () => {
+	const gh = fakeGh([ISSUE_10]);
+	await assert.rejects(watch.github({ repo: 'x/y', token: '', fetch: gh.fetch }).listIssues(), /^Error: GH_TOKEN is not set\./);
+	assert.deepEqual(gh.calls, []);
+});
+
+test('a GitHub API failure names the request and the reason', async () => {
+	const denied = async () => new Response(JSON.stringify({ message: 'Bad credentials' }), { status: 401 });
+	await assert.rejects(watch.github({ repo: 'x/y', token: 't', fetch: denied }).comment(10, 'x'), {
+		message: 'GitHub API POST /repos/x/y/issues/10/comments: HTTP 401 Bad credentials',
+	});
+	const offline = async () => { throw new TypeError('fetch failed', { cause: new Error('getaddrinfo ENOTFOUND api.github.com') }); };
+	await assert.rejects(watch.github({ repo: 'x/y', token: 't', fetch: offline }).listIssues(), {
+		message: 'GitHub API GET /repos/x/y/issues?state=all&per_page=100: fetch failed (getaddrinfo ENOTFOUND api.github.com)',
+	});
+});
+
+test('a tool missing from the PATH fails the run with a message naming it, not a bare ENOENT', () => {
+	const env = { PATH: fx.tempDir('watch-empty-path'), PMMP_UPDATER_CACHE: fx.tempDir('watch-cache') };
+	if (process.env.SYSTEMROOT) env.SYSTEMROOT = process.env.SYSTEMROOT;
+	const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'watch.js'), '--dry-run', '--repo', 'x/y', '--packages-src', packagesFixture()], { env, encoding: 'utf8' });
+	assert.equal(r.status, 1, r.stderr);
+	assert.match(r.stderr, /^watch: git is not on the PATH of this machine\. The watch runs git; install it or add it to the PATH of the runner that takes the job\.$/m);
+	assert.doesNotMatch(r.stderr, /ENOENT/);
 });
 
 test('live: Mojang docs tags and the BDS links JSON parse', { skip: !process.env.RIFTAL_LIVE }, async () => {

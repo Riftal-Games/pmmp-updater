@@ -13,7 +13,6 @@
 // Mojang's docs have no tag for yet. An issue filed by hand counts as covering a docs
 // tag when its body names that tag, as #10 does.
 
-const { execFileSync } = require('child_process');
 const docs = require('../lib/mojang-docs');
 const pkg = require('../lib/packages');
 const docsDiff = require('../docs-diff/diff');
@@ -23,7 +22,7 @@ const BDS_LINKS_URL = 'https://net-secondary.web.minecraft-services.net/api/v1.0
 const BDS_CHANNELS = { serverBedrockLinux: 'release', serverBedrockPreviewLinux: 'preview' };
 const PREVIEW_LABELS = ['owner:updater', 'route:steward', 'M1', 'prep'];
 const RELEASE_LABEL = 'critical-path';
-const ISSUE_LIMIT = 1000;
+const DEFAULT_API_URL = 'https://api.github.com';
 
 function parseArgs(argv) {
 	const a = { dry_run: false, repo: process.env.GITHUB_REPOSITORY || DEFAULT_REPO };
@@ -72,30 +71,77 @@ async function fetchBdsLinks() {
 	return parseBdsLinks(await res.json());
 }
 
-function ghCli(args, input) {
-	return execFileSync('gh', args, { encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] });
-}
-
-function github(gh, repo) {
+// GitHub's REST API through fetch, so the watch needs no gh binary on the runner, only
+// the job's GH_TOKEN. The issues endpoint also lists pull requests, which are dropped.
+function github({ repo, token, fetch: fetchImpl = fetch, apiUrl = DEFAULT_API_URL }) {
+	async function call(method, url, body) {
+		if (!token) throw new Error('GH_TOKEN is not set. The watch reads and writes issues through the GitHub REST API with it; in Actions, pass GH_TOKEN: ${{ github.token }} to the step.');
+		const where = `GitHub API ${method} ${url.replace(apiUrl, '')}`;
+		let res;
+		try {
+			res = await fetchImpl(url, {
+				method,
+				signal: AbortSignal.timeout(30000),
+				headers: { accept: 'application/vnd.github+json', authorization: `Bearer ${token}`, 'x-github-api-version': '2022-11-28', 'content-type': 'application/json' },
+				body: body === undefined ? undefined : JSON.stringify(body),
+			});
+		} catch (e) {
+			throw new Error(`${where}: ${e.message}${e.cause ? ` (${e.cause.message || e.cause})` : ''}`);
+		}
+		const text = await res.text();
+		if (!res.ok) {
+			let message = text;
+			try {
+				message = JSON.parse(text).message || text;
+			} catch {}
+			throw new Error(`${where}: HTTP ${res.status} ${message}`.trim());
+		}
+		const next = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('link') || '');
+		return { data: text ? JSON.parse(text) : null, next: next ? next[1] : null };
+	}
+	async function all(path) {
+		const out = [];
+		for (let url = `${apiUrl}${path}`; url;) {
+			const page = await call('GET', url);
+			out.push(...page.data);
+			url = page.next;
+		}
+		return out;
+	}
+	const base = `/repos/${repo}/issues`;
 	return {
-		listIssues() {
-			const issues = JSON.parse(gh(['issue', 'list', '-R', repo, '--state', 'all', '--limit', String(ISSUE_LIMIT), '--json', 'number,title,state,body,labels']));
-			if (issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT} or more issues; raise ISSUE_LIMIT so no existing issue is missed`);
-			return issues;
+		async listIssues() {
+			const items = await all(`${base}?state=all&per_page=100`);
+			return items.filter((i) => !i.pull_request).map((i) => ({
+				number: i.number,
+				title: i.title,
+				state: String(i.state).toUpperCase(),
+				body: i.body || '',
+				labels: (i.labels || []).map((l) => ({ name: typeof l === 'string' ? l : l.name })),
+			}));
 		},
-		comments(number) {
-			return JSON.parse(gh(['issue', 'view', String(number), '-R', repo, '--json', 'comments'])).comments.map((c) => c.body || '');
+		async comments(number) {
+			return (await all(`${base}/${number}/comments?per_page=100`)).map((c) => c.body || '');
 		},
-		create(title, body, labels) {
-			return gh(['issue', 'create', '-R', repo, '--title', title, '--body-file', '-', ...labels.flatMap((l) => ['--label', l])], body).trim();
+		async create(title, body, labels) {
+			return (await call('POST', `${apiUrl}${base}`, { title, body, labels })).data.html_url;
 		},
-		comment(number, body) {
-			return gh(['issue', 'comment', String(number), '-R', repo, '--body-file', '-'], body).trim();
+		async comment(number, body) {
+			return (await call('POST', `${apiUrl}${base}/${number}/comments`, { body })).data.html_url;
 		},
-		addLabel(number, label) {
-			return gh(['issue', 'edit', String(number), '-R', repo, '--add-label', label]).trim();
+		async addLabel(number, label) {
+			await call('POST', `${apiUrl}${base}/${number}/labels`, { labels: [label] });
 		},
 	};
+}
+
+// A tool the watch spawns, git for Mojang's docs tags, that is missing from the PATH
+// surfaces from Node as a bare "spawnSync git ENOENT".
+function describeError(e) {
+	if (e && e.code === 'ENOENT' && /^spawn/.test(String(e.syscall))) {
+		return `${e.path} is not on the PATH of this machine. The watch runs ${e.path}; install it or add it to the PATH of the runner that takes the job.`;
+	}
+	return e && e.message ? e.message : String(e);
 }
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -183,7 +229,7 @@ async function plan(deps) {
 	const fromTag = docs.tagForVersion(tags, ours.version);
 	const newer = (v) => compareVersions(v, ours.version) > 0;
 	const versions = [...new Set([...tags.map((t) => t.version), ...bds.map((b) => b.version)])].filter(newer).sort(compareVersions);
-	const issues = versions.length ? deps.gh.listIssues() : [];
+	const issues = versions.length ? await deps.gh.listIssues() : [];
 	const tagNames = new Set(tags.map((t) => t.tag));
 	const entries = [];
 
@@ -193,7 +239,7 @@ async function plan(deps) {
 		const builds = bds.filter((b) => b.version === version);
 		const matched = issuesForVersion(issues, version).sort((a, b) => a.number - b.number);
 		const covered = new Set();
-		for (const i of matched) for (const k of coverage(i, deps.gh.comments(i.number), versionTags)) covered.add(k);
+		for (const i of matched) for (const k of coverage(i, await deps.gh.comments(i.number), versionTags)) covered.add(k);
 		const open = matched.find((i) => i.state === 'OPEN') || null;
 		const base = { version, issue: open ? open.number : null, matched: matched.map((i) => i.number) };
 
@@ -276,14 +322,14 @@ function render(p, dryRun) {
 	return out.join('\n') + '\n';
 }
 
-function apply(p, gh) {
+async function apply(p, gh) {
 	const done = [];
 	for (const e of p.entries) {
-		if (e.kind === 'file') done.push(`FILED ${gh.create(e.title, e.body, e.labels)}`);
+		if (e.kind === 'file') done.push(`FILED ${await gh.create(e.title, e.body, e.labels)}`);
 		else if (e.kind === 'comment') {
-			done.push(`COMMENTED ${gh.comment(e.issue, e.body)}`);
+			done.push(`COMMENTED ${await gh.comment(e.issue, e.body)}`);
 			if (e.addLabel) {
-				gh.addLabel(e.issue, e.addLabel);
+				await gh.addLabel(e.issue, e.addLabel);
 				done.push(`LABELLED #${e.issue} ${e.addLabel}`);
 			}
 		}
@@ -294,7 +340,12 @@ function apply(p, gh) {
 async function main(argv, deps = {}) {
 	const args = parseArgs(argv);
 	const write = deps.write || ((s) => process.stdout.write(s));
-	const gh = github(deps.gh || ghCli, args.repo);
+	const gh = github({
+		repo: args.repo,
+		token: 'token' in deps ? deps.token : process.env.GH_TOKEN || process.env.GITHUB_TOKEN,
+		fetch: deps.fetch,
+		apiUrl: process.env.GITHUB_API_URL || DEFAULT_API_URL,
+	});
 	const p = await plan({
 		ours: pkg.readProtocolInfo(args.packages_src),
 		listTags: deps.listTags || docs.listTags,
@@ -304,7 +355,7 @@ async function main(argv, deps = {}) {
 	});
 	write(render(p, args.dry_run));
 	if (!args.dry_run) {
-		const done = apply(p, gh);
+		const done = await apply(p, gh);
 		if (done.length) write(done.join('\n') + '\n');
 	}
 	return p.warnings.length ? 1 : 0;
@@ -312,9 +363,9 @@ async function main(argv, deps = {}) {
 
 if (require.main === module) {
 	main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => {
-		process.stderr.write(`watch: ${e.message}\n`);
+		process.stderr.write(`watch: ${describeError(e)}\n`);
 		process.exitCode = 1;
 	});
 }
 
-module.exports = { BDS_LINKS_URL, DEFAULT_REPO, parseArgs, parseBdsLinks, fetchBdsLinks, compareVersions, issuesForVersion, coverage, markersIn, summarize, plan, render, apply, main, github };
+module.exports = { BDS_LINKS_URL, DEFAULT_REPO, describeError, parseArgs, parseBdsLinks, fetchBdsLinks, compareVersions, issuesForVersion, coverage, markersIn, summarize, plan, render, apply, main, github };

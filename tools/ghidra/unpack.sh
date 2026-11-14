@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-# Runs inside the unpack container tools/ghidra/analyze.js starts, with no network.
 # Usage: unpack.sh <node tarball> <node sha256> <jdk tarball> <jdk sha256> <ghidra zip> <ghidra sha256>
-# Checks the three pinned archives and unpacks them into staging/, the context the image
-# is built from. Paths are relative to the working directory, / in the container, so a
-# test can run it on a fixture tree.
+# Runs in analyze.js's unpack container, which has no network, and unpacks the three pinned
+# archives into staging/, the image's build context. Paths are relative to the working
+# directory, / in the container, so a test can run it on a fixture tree.
 set -euo pipefail
 
 refuse() { echo "unpack: $1" >&2; exit 1; }
 
-echo "$2  node/$1" | sha256sum --check
-echo "$4  dist/$3" | sha256sum --check
-echo "$6  dist/$5" | sha256sum --check
+printf '%s  %s\n' "$2" "node/$1" "$4" "dist/$3" "$6" "dist/$5" | sha256sum --check
 mkdir staging/node staging/jdk staging/zip
 tar -xzf "node/$1" -C staging/node --strip-components=1
 tar -xzf "dist/$3" -C staging/jdk --strip-components=1
@@ -19,8 +16,7 @@ tar -xzf "dist/$3" -C staging/jdk --strip-components=1
 # at that ceiling could extract partly with no error.
 out=$(staging/node/bin/node bdstool/unzip.js "dist/$5" staging/zip)
 echo "$out"
-count=${out#unzipped }
-count=${count%% *}
+read -r _ count _ <<<"$out"
 [[ $count =~ ^[0-9]+$ ]] && ((count < 65535)) || refuse "$count entries, at or over the 16-bit ceiling"
 top=(staging/zip/*)
 [ ${#top[@]} -eq 1 ] && [ -d "${top[0]}" ] || refuse "the Ghidra zip has no single top directory"
@@ -34,6 +30,10 @@ for f in support/analyzeHeadless Ghidra/Features/Decompiler/os/linux_x86_64/deco
 	echo "$f $(stat -c %A "staging/ghidra/$f")"
 done
 
-# A MAXMEM= the launcher sets itself would override the MAXMEM analyze.js passes.
-! grep -nE '^[[:space:]]*MAXMEM=' staging/ghidra/support/analyzeHeadless || refuse "support/analyzeHeadless sets MAXMEM itself"
-echo "support/analyzeHeadless has no uncommented MAXMEM= line"
+# The heap is analyze.js's GHIDRA_HEADLESS_MAXMEM only while 12.1.4's line 17, at the start
+# of its line, is the one assignment of it, and line 43 passes it to launch.sh as -Xmx.
+h=staging/ghidra/support/analyzeHeadless
+n=$(awk '!/^[ \t]*#/ { s = " " $0; n += gsub(/[^A-Za-z0-9_]GHIDRA_HEADLESS_MAXMEM=/, "", s) } END { print n + 0 }' "$h")
+((n == 1)) && grep -qE '^GHIDRA_HEADLESS_MAXMEM=\$\{GHIDRA_HEADLESS_MAXMEM:=' "$h" || refuse "$h assigns GHIDRA_HEADLESS_MAXMEM $n times, not once in line 17's form"
+grep -qE '^[^#]*launch\.sh([[:space:]]+[^[:space:]]+){3}[[:space:]]+"\$\{GHIDRA_HEADLESS_MAXMEM\}"([[:space:]]|$)' "$h" || refuse "$h passes no \"\${GHIDRA_HEADLESS_MAXMEM}\" as launch.sh's fourth word"
+echo "support/analyzeHeadless keeps an outside GHIDRA_HEADLESS_MAXMEM and passes it to launch.sh"

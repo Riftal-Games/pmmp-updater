@@ -26,11 +26,12 @@ test('the pins are an exact Temurin 21 Linux x64 JDK and the Ghidra 12.1.4 relea
 	assert.equal(ghidra.NODE, record.NODE);
 });
 
-test('the unpack container is capped, has no network or port, a smoke name, and only staging writable', () => {
+test('the unpack container is capped, has no network or port, a smoke name, only staging writable, and no heap variable but GHIDRA_HEADLESS_MAXMEM, as the image has none', () => {
 	const args = ghidra.unpackArgs('/c', '/c/ghidra/staging/7', '1000:1000');
 	assert.deepEqual(args.slice(0, 5), ['run', '--rm', '--init', '--pull', 'never']);
 	assert.equal(args[args.indexOf('--name') + 1], `riftal_smoke_ghidra_unpack_${process.pid}`);
-	assert.match(args.join(' '), /--network none -m 2g --cpus 2 --user 1000:1000 -e HOME=\/tmp -e MAXMEM=1400M -w \//);
+	assert.match(args.join(' '), /--network none -m 2g --cpus 2 --user 1000:1000 -e HOME=\/tmp -e GHIDRA_HEADLESS_MAXMEM=1400M -w \//);
+	assert.doesNotMatch(`${args.join(' ')}\n${ghidra.dockerfile()}`, /(^|[^A-Z_])(GHIDRA_MAXMEM|GHIDRA_(HEADLESS_)?JAVA_OPTIONS|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|MAXMEM)=/m);
 	assert.ok(!args.some((x) => /^(-p|--publish|--privileged|--cap-add)(=|$)/.test(x)));
 	const mounts = args.filter((_, i) => args[i - 1] === '-v');
 	assert.deepEqual(mounts.filter((m) => !m.endsWith(':ro')), ['/c/ghidra/staging/7:/staging']);

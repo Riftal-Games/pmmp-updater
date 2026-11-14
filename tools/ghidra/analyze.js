@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
-// Builds ADR 004's Ghidra image: fetches the pinned JDK, Ghidra and Node into the cache,
-// hash-checked, unpacks them with unpack.sh in a throwaway container with no network, and
-// builds an image FROM inspect.IMAGE that only copies that tree. Nothing pulls.
-// Usage, where docker is local as tools/bds/inspect.js says:
-//   node tools/ghidra/analyze.js [--cache <dir>] [--docker <command>] [--dry-run]
+// Builds ADR 004's Ghidra image: fetches the pinned JDK, Ghidra and Node, hash-checked,
+// unpacks them with unpack.sh in a container with no network, and builds FROM inspect.IMAGE
+// by copying that tree. Nothing pulls. Docker is local as tools/bds/inspect.js says.
+// Usage: node tools/ghidra/analyze.js [--cache <dir>] [--docker <command>] [--dry-run]
 
 const fs = require('fs');
 const os = require('os');
@@ -38,10 +37,11 @@ const MIN_FREE = 4 * GIB;
 const MIN_DISK = 8 * GIB;
 
 // The PC's cap for a build, no network and no port, on every container this tool starts.
+// GHIDRA_HEADLESS_MAXMEM, the -Xmx analyzeHeadless gives launch.sh, is the one heap setting.
 function runArgs(step, user) {
 	return [
 		'run', '--rm', '--init', '--pull', 'never', '--name', `riftal_smoke_ghidra_${step}_${process.pid}`,
-		'--network', 'none', '-m', '2g', '--cpus', '2', '--user', user, '-e', 'HOME=/tmp', '-e', 'MAXMEM=1400M',
+		'--network', 'none', '-m', '2g', '--cpus', '2', '--user', user, '-e', 'HOME=/tmp', '-e', 'GHIDRA_HEADLESS_MAXMEM=1400M',
 	];
 }
 
@@ -139,10 +139,7 @@ async function main(argv, log = (s) => process.stdout.write(`${s}\n`), { seconds
 }
 
 if (require.main === module) {
-	main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => {
-		process.stderr.write(`ghidra: ${e.message}\n`);
-		process.exitCode = 1;
-	});
+	main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => { process.stderr.write(`ghidra: ${e.message}\n`); process.exitCode = 1; });
 }
 
 module.exports = { NODE, JDK, GHIDRA, TAG, SECONDS, unpackArgs, dockerfile, buildArgs, headroom, fetchDist, main };

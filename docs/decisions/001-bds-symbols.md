@@ -101,5 +101,6 @@ the server speaks, and reading them needs no per-build offsets.
   that unaided on this binary is for #5 to establish; budget for naming by hand.
 - **Cache:** each build costs about 100 MB of zip in the cache. The binary is extracted
   only inside the throwaway container. Neither is committed.
+  ADR 004 item 6 amends this: a Ghidra project per Build ID, holding the binary's bytes, persists in the cache.
 - **Revisit** if a links API entry or a zip ever carries `bedrock_server.debug`.
   `tools/bds/probe.sh` lists any such file in the zip on the next run.

@@ -99,6 +99,7 @@ the server speaks, and reading them needs no per-build offsets.
   finding 8 locate each packet class's typeinfo and from it the vtable, so `read` and
   `write` are reached by vtable slot rather than by name. Whether Ghidra's analysis does
   that unaided on this binary is for #5 to establish; budget for naming by hand.
+  ADR 004 item 8 replaces that budget with a committed slot rule over an unanalysed import.
 - **Cache:** each build costs about 100 MB of zip in the cache. The binary is extracted
   only inside the throwaway container. Neither is committed.
   ADR 004 item 6 amends this: a Ghidra project per Build ID, holding the binary's

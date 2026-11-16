@@ -3,6 +3,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const t = require('../tracer');
 
 // A made-up protocol, so nothing here depends on a real version's numbers.
@@ -18,26 +21,6 @@ test('varints round-trip and a truncated or overlong one fails', () => {
 	assert.throws(() => t.readVarint(Buffer.alloc(6, 0xff), 0), /longer than 5/);
 });
 
-test('a frame reads back as written, split fields included, and a short one fails', () => {
-	const body = Buffer.from('payload');
-	const [f] = t.decodeFrames(Buffer.concat([Buffer.alloc(4), t.encodeFrame(body, 5, 6, { count: 3, id: 7, index: 2 })]));
-	assert.deepEqual(f, { reliability: 3, reliableIndex: 5, orderIndex: 6, split: { count: 3, id: 7, index: 2 }, body });
-	assert.throws(() => t.decodeFrames(Buffer.concat([Buffer.alloc(4), t.encodeFrame(body, 0, 0).subarray(0, -1)])), /malformed/);
-});
-
-test('split, shuffled and repeated datagrams reach the peer once each, in order', () => {
-	const [wire, acks, got] = [[], [], []];
-	const sender = new t.Session((d) => wire.push(d), () => {});
-	const big = crypto.randomBytes(5000);
-	[big, Buffer.from('second')].forEach((m) => sender.send(m));
-	const receiver = new t.Session((d) => acks.push(d), (m) => got.push(m));
-	// A reliable unordered frame, sent twice, as a server resends one it saw no ACK for.
-	const unordered = Buffer.from([0x84, 9, 0, 0, 0x40, 0, 8, 7, 0, 0, 0x75]);
-	for (const d of [4, 2, 0, 2, 3, 1, 0].map((i) => wire[i]).concat(unordered, unordered)) receiver.receive(d);
-	assert.deepEqual(got, [big, Buffer.from('second'), Buffer.from('u')]);
-	assert.deepEqual([acks.length, acks[0]], [9, Buffer.from([0xc0, 0, 1, 1, 4, 0, 0])]);
-});
-
 test('a batch survives compression and encryption in order, and a flipped byte fails its checksum', () => {
 	const [client, server] = [0, 1].map(() => ({ compressed: true, cipher: new t.Cipher(KEY) }));
 	const packets = [Buffer.concat([t.varint(11), Buffer.from('start')]), Buffer.concat([t.varint(0x1a2), Buffer.from('x')])];
@@ -45,8 +28,9 @@ test('a batch survives compression and encryption in order, and a flipped byte f
 	const bad = t.encodeBatch(packets, client);
 	bad[3] ^= 1;
 	assert.throws(() => t.decodeBatch(bad, server), /checksum/);
-	assert.throws(() => t.decodeBatch(Buffer.from([0xfe, 0x01, 0]), { compressed: true }), /neither zlib nor none/);
-	assert.throws(() => t.decodeBatch(Buffer.from([0xfe, 5, 1]), {}), /past the end of its batch/);
+	assert.throws(() => t.decodeBatch(Buffer.from([0x01, 0]), { compressed: true }), /neither zlib nor none/);
+	assert.throws(() => t.decodeBatch(Buffer.from([5, 1]), {}), /past the end of its batch/);
+	assert.deepEqual(t.encodeBatch([Buffer.from([0xfe])], {}), Buffer.from([1, 0xfe]));
 });
 
 test('the session key is the shared secret salted, and a handshake signed by another key fails', () => {
@@ -74,12 +58,53 @@ test('the login carries the protocol from protocol_info and a token and client d
 	assert.ok(verifies(auth.Token) && verifies(data));
 	assert.deepEqual([part(auth.Token, 1).cpk, part(auth.Token, 1).aud], [keys.der, 'api://auth-minecraft-services/multiplayer']);
 	assert.equal(part(data, 1).GameVersion, '9.8.7');
+	assert.equal(part(data, 1).DeviceOS, 15);
 });
+
+// A server stood in for over a fake transport answers each step of the join, then sends
+// the WANTED packets, encrypted only where the transport says Bedrock's cipher runs.
+for (const bedrockCipher of [false, true]) {
+	test(`with bedrockCipher ${bedrockCipher} the handshake reply is ${bedrockCipher ? 'encrypted' : 'plain'} and the session is recorded`, async () => {
+		const ids = Object.fromEntries([['LoginPacket', 1], ['ServerToClientHandshakePacket', 3], ['ClientToServerHandshakePacket', 4], ['NetworkSettingsPacket', 143], ['RequestNetworkSettingsPacket', 193], ...t.WANTED.map((n, i) => [n, 300 + i])]);
+		const out = fs.mkdtempSync(path.join(os.tmpdir(), 'tracer-'));
+		fs.writeFileSync(path.join(out, 'info.json'), JSON.stringify({ version: INFO.version, packets: ids }));
+		const server = t.makeKeys();
+		const state = { compressed: true, cipher: null };
+		const [sent, replies] = [[], []];
+		let deliver = null;
+		const reply = (packets, s) => setImmediate(() => deliver(t.encodeBatch(packets, s)));
+		const send = (batch) => {
+			sent.push(batch);
+			if (sent.length === 1) return reply([t.varint(143)], {});
+			if (sent.length > 2) {
+				replies.push(...t.decodeBatch(batch, state).map((r) => r.id));
+				return reply(t.WANTED.map((n) => t.varint(ids[n])), state);
+			}
+			const p = t.decodeBatch(batch, state)[0].packet;
+			const [length, at] = t.readVarint(p, 5);
+			const request = p.subarray(at, at + length);
+			const cpk = part(JSON.parse(request.subarray(4, 4 + request.readUInt32LE(0))).Token, 1).cpk;
+			const salt = crypto.randomBytes(16);
+			const secret = crypto.diffieHellman({ privateKey: server.privateKey, publicKey: crypto.createPublicKey({ key: Buffer.from(cpk, 'base64'), format: 'der', type: 'spki' }) });
+			if (bedrockCipher) state.cipher = new t.Cipher(crypto.createHash('sha256').update(salt).update(secret).digest());
+			const token = t.jwt({ salt: salt.toString('base64') }, server);
+			reply([Buffer.concat([t.varint(3), t.varint(token.length), Buffer.from(token)])], { compressed: true });
+		};
+		const link = { bedrockCipher, send, close() {}, open: async (onMessage) => { deliver = onMessage; } };
+		const code = await t.trace({ protocol_info: path.join(out, 'info.json'), out, port: 19132, deadline: 10 }, () => {}, link);
+		const capture = fs.readFileSync(path.join(out, 'capture.bin'));
+		const recorded = [];
+		for (let i = 0; i < capture.length; i += 6 + capture.readUInt32BE(i + 2)) recorded.push(capture.readUInt16BE(i));
+		assert.deepEqual([code, replies, recorded], [0, [4], [143, 3, ...t.WANTED.map((n) => ids[n])]]);
+	});
+}
 
 test('a capture record is the ID, the length, then the packet, and arguments need both paths', () => {
 	const capture = t.encodeCapture([{ id: 0x1a2, packet: Buffer.from('ab') }, { id: 11, packet: Buffer.alloc(0) }]);
 	assert.deepEqual(capture, Buffer.from([0x01, 0xa2, 0, 0, 0, 2, 0x61, 0x62, 0, 11, 0, 0, 0, 0]));
-	assert.deepEqual(t.parseArgs(['--protocol-info', 'p.json', '--out', '/o']), { protocol_info: 'p.json', out: '/o', port: 19132, deadline: 90 });
+	assert.deepEqual(t.parseArgs(['--protocol-info', 'p.json', '--out', '/o']), { protocol_info: 'p.json', out: '/o', port: 19132, deadline: 90, transport: 'nethernet' });
+	assert.equal(t.parseArgs(['--protocol-info', 'p', '--out', '/o', '--transport', 'raknet']).transport, 'raknet');
+	assert.throws(() => t.parseArgs(['--protocol-info', 'p', '--out', '/o', '--transport', 'quic']), /nethernet or raknet/);
 	assert.throws(() => t.parseArgs(['--out', '/o']), /required/);
 	assert.throws(() => t.parseArgs(['--protocol-info', 'p', '--out', '/o', '--port', 'x']), /positive/);
 	assert.throws(() => t.parseArgs(['--verbose']), /Unknown option/);

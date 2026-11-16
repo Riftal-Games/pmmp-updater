@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 'use strict';
 
-// Records one client session against a Linux BDS. Downloads the build into the cache as
-// inspect.js does, then runs run.sh in the pinned ubuntu:24.04 container with no network
-// but loopback and no published port: BDS from the read-only cache mount, tracer.js
-// joining it on 127.0.0.1, the capture written to <cache>/captures/<build>/capture.bin.
+// Records one client session against a Linux BDS. Downloads the build, the pinned Node and
+// the locked packages into the cache, then runs run.sh in the pinned ubuntu:24.04
+// container, alone on an internal network in isolated gateway mode and with no published
+// port: BDS from the read-only cache mount, tracer.js beside it in the same container on
+// the chosen transport, the capture written to <cache>/captures/<build>/capture.bin.
 //
 // Usage: node tools/bds/record.js [--channel release|preview] [--links-file <json>]
-//   [--cache <dir>] [--docker <command>] [--dry-run]
+//   [--cache <dir>] [--docker <command>] [--transport nethernet|raknet] [--dry-run]
 //
 // Run it where docker is local, as inspect.js says.
 
@@ -15,7 +16,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const inspect = require('./inspect');
 const pkg = require('../lib/packages');
 
@@ -29,69 +30,187 @@ const NODE = {
 	url: 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.gz',
 	sha256: 'b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406',
 };
+const LOCK = require('./package-lock.json');
+const LICENCES = ['MIT', 'ISC', 'BSD-2-Clause', 'BSD-3-Clause', 'Apache-2.0', 'MPL-2.0'];
+const NET_PREFIX = 'riftal_smoke_bds_net_';
+const ISOLATED = 'com.docker.network.bridge.gateway_mode_ipv4';
 
-function sha256(body) {
-	return crypto.createHash('sha256').update(body).digest('hex');
-}
+const digest = (algo, body) => crypto.createHash(algo).update(body).digest('hex');
 
-// The cached tarball is checked on every run, and a download is renamed into place only
-// once its hash matches, so the container never sees a Node that is not the pinned one.
-async function nodeTarball(cacheDir, log, pin = NODE, get = fetch) {
-	const dest = path.join(cacheDir, 'node', pin.file);
+// The cached file is checked on every run, and a download is renamed into place only once
+// its hash matches, so the container never sees a file that is not the pinned one.
+async function pinnedFile(dest, url, algo, want, log, get) {
 	if (fs.existsSync(dest)) {
-		const got = sha256(fs.readFileSync(dest));
-		if (got !== pin.sha256) throw new Error(`cached ${dest} has sha256 ${got}, expected ${pin.sha256}`);
+		const got = digest(algo, fs.readFileSync(dest));
+		if (got !== want) throw new Error(`cached ${dest} has ${algo} ${got}, expected ${want}`);
 		log(`cached ${dest}`);
 		return dest;
 	}
-	log(`downloading ${pin.url}`);
-	const res = await get(pin.url, { signal: AbortSignal.timeout(300000) });
-	if (!res.ok) throw new Error(`Node download: HTTP ${res.status}`);
+	log(`downloading ${url}`);
+	const res = await get(url, { signal: AbortSignal.timeout(300000) });
+	if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
 	const body = Buffer.from(await res.arrayBuffer());
-	const got = sha256(body);
-	if (got !== pin.sha256) throw new Error(`Node download: sha256 ${got}, expected ${pin.sha256}`);
+	const got = digest(algo, body);
+	if (got !== want) throw new Error(`${url}: ${algo} ${got}, expected ${want}`);
 	fs.mkdirSync(path.dirname(dest), { recursive: true });
 	fs.writeFileSync(`${dest}.part`, body);
 	fs.renameSync(`${dest}.part`, dest);
-	log(`saved ${dest}, sha256 ${got}`);
+	log(`saved ${dest}, ${algo} ${got}`);
 	return dest;
 }
 
-function dockerArgs(build, cacheDir, outDir, user) {
+function nodeTarball(cacheDir, log, pin = NODE, get = fetch) {
+	return pinnedFile(path.join(cacheDir, 'node', pin.file), pin.url, 'sha256', pin.sha256, log, get);
+}
+
+// Every way ADR 003 says a locked package may not reach the run.
+function lockProblems(lock) {
+	const out = lock.lockfileVersion === 3 ? [] : [`lockfileVersion ${lock.lockfileVersion}`];
+	for (const [key, e] of Object.entries(lock.packages || {})) {
+		if (!key) continue;
+		if (!String(e.resolved).startsWith('https://registry.npmjs.org/')) out.push(`${key}: resolved ${e.resolved}`);
+		if (!/^sha512-[A-Za-z0-9+/]{86}==$/.test(e.integrity)) out.push(`${key}: no sha512 integrity`);
+		if (e.hasInstallScript) out.push(`${key}: install script`);
+		for (const f of ['os', 'cpu', 'optional']) if (f in e) out.push(`${key}: ${f}`);
+		if (!LICENCES.includes(e.license)) out.push(`${key}: licence ${e.license}`);
+	}
+	return out;
+}
+
+// Each tarball is cached under the hex of its sha512, the name run.sh checks it by. None
+// is required or unpacked here, so the dependency never runs on the host.
+async function npmTarballs(cacheDir, log, lock = LOCK, get = fetch) {
+	const bad = lockProblems(lock);
+	if (bad.length) throw new Error(`package-lock.json: ${bad.join('; ')}`);
+	for (const [key, e] of Object.entries(lock.packages)) {
+		if (!key) continue;
+		const hex = Buffer.from(e.integrity.slice(7), 'base64').toString('hex');
+		await pinnedFile(path.join(cacheDir, 'npm', `${hex}.tgz`), e.resolved, 'sha512', hex, log, get);
+	}
+}
+
+function dockerArgs(build, cacheDir, outDir, user, transport = 'nethernet') {
 	return [
 		'run', '--rm', '--init', '--name', `riftal_smoke_bds_record_${process.pid}`,
-		'--network', 'none', '-m', '2g', '--cpus', '2', '--user', user, '-e', 'HOME=/tmp',
+		'--network', `${NET_PREFIX}${process.pid}`, '-m', '2g', '--cpus', '2', '--user', user, '-e', 'HOME=/tmp',
 		'-v', `${cacheDir}:/bds:ro`,
 		'-v', `${path.join(cacheDir, 'node')}:/node:ro`,
+		'-v', `${path.join(cacheDir, 'npm')}:/npm:ro`,
 		'-v', `${__dirname}:/tool:ro`,
 		'-v', `${PROTOCOL_INFO}:/proto/protocol_info.json:ro`,
 		'-v', `${outDir}:/out`,
-		inspect.IMAGE, 'bash', '/tool/run.sh', build.file, NODE.file, NODE.sha256,
+		inspect.IMAGE, 'bash', '/tool/run.sh', build.file, NODE.file, NODE.sha256, transport,
 	];
 }
 
-async function main(argv, log = (s) => process.stdout.write(`${s}\n`)) {
-	const a = inspect.parseArgs(argv);
+const networkCreateArgs = (name) => ['network', 'create', '--internal', '-o', `${ISOLATED}=isolated`, name];
+
+function networkProblems(n) {
+	const out = [];
+	if (n.Internal !== true) out.push(`Internal ${n.Internal}`);
+	if (n.EnableIPv6 !== false) out.push(`EnableIPv6 ${n.EnableIPv6}`);
+	if ((n.Options || {})[ISOLATED] !== 'isolated') out.push(`${ISOLATED} ${(n.Options || {})[ISOLATED]}`);
+	const gateways = ((n.IPAM || {}).Config || []).map((c) => c.Gateway).filter(Boolean);
+	if (gateways.length) out.push(`IPAM Gateway ${gateways.join(',')}`);
+	return out;
+}
+
+function docker(cmd, args) {
+	const r = spawnSync(cmd, args, { encoding: 'utf8' });
+	if (r.error) throw r.error;
+	return r;
+}
+
+// Held for the network's whole life, so a signal at any point still reaches the removal
+// below. The run is spawned, not spawnSync'd, so a signal is handled while it runs.
+function trapSignals() {
+	const trap = { signals: [], child: null };
+	const stop = (s) => {
+		trap.signals.push(s);
+		if (trap.child) trap.child.kill('SIGTERM');
+	};
+	const names = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+	names.forEach((s) => process.on(s, stop));
+	trap.release = () => names.forEach((s) => process.off(s, stop));
+	return trap;
+}
+
+function timed(args, trap) {
+	if (trap.signals.length) return Promise.resolve(1);
+	return new Promise((resolve, reject) => {
+		trap.child = spawn('timeout', args, { stdio: 'inherit' });
+		trap.child.on('error', reject);
+		trap.child.on('exit', (code) => resolve(code === null ? 1 : code));
+	});
+}
+
+// The container is removed by name before the network on every path, because a forced
+// timeout can kill the docker CLI while the container runs on, and a network with an
+// endpoint attached cannot be removed. A stray from another run is never removed here.
+async function onIsolatedNetwork(cmd, name, container, log, start) {
+	const ls = docker(cmd, ['network', 'ls', '--filter', `name=${NET_PREFIX}`, '--format', '{{.Name}}']);
+	const strays = ls.stdout.split('\n').filter((n) => n.startsWith(NET_PREFIX));
+	for (const n of strays) log(`stranded network ${n}, left in place`);
+	if (ls.status !== 0 || strays.includes(name)) {
+		log(`bds record: cannot claim network ${name}`);
+		return 1;
+	}
+	try {
+		const made = docker(cmd, networkCreateArgs(name));
+		if (made.status !== 0) throw new Error(`network create refused: ${made.stderr.trim()}`);
+		const n = JSON.parse(docker(cmd, ['network', 'inspect', name]).stdout)[0] || {};
+		const bad = networkProblems(n);
+		if (bad.length) throw new Error(`network ${name} is not isolated: ${bad.join('; ')}`);
+		log(`network ${name} ${JSON.stringify({ Internal: n.Internal, EnableIPv6: n.EnableIPv6, Options: n.Options, IPAM: n.IPAM && n.IPAM.Config })}`);
+		return await start();
+	} catch (e) {
+		log(`bds record: ${e.message}`);
+		return 1;
+	} finally {
+		docker(cmd, ['rm', '-f', container]);
+		const rm = docker(cmd, ['network', 'rm', name]);
+		if (rm.status !== 0) log(`network ${name} not removed: ${rm.stderr.trim()}`);
+	}
+}
+
+async function fetchInputs(build, cacheDir, log) {
+	await inspect.download(build, cacheDir, log);
+	await nodeTarball(cacheDir, log);
+	await npmTarballs(cacheDir, log);
+}
+
+async function main(argv, log = (s) => process.stdout.write(`${s}\n`), { seconds = SECONDS, fetchAll = fetchInputs } = {}) {
+	const at = argv.indexOf('--transport');
+	const transport = at < 0 ? 'nethernet' : argv[at + 1];
+	if (!['nethernet', 'raknet'].includes(transport)) throw new Error('--transport must be nethernet or raknet');
+	const a = inspect.parseArgs(at < 0 ? argv : [...argv.slice(0, at), ...argv.slice(at + 2)]);
 	const build = inspect.selectBuild(await inspect.readLinks(a), a.channel);
 	const out = path.join(a.cache, 'captures', build.build);
 	const me = os.userInfo();
-	const args = ['--kill-after=10', String(SECONDS), a.docker, ...dockerArgs(build, a.cache, out, `${me.uid}:${me.gid}`)];
+	const run = dockerArgs(build, a.cache, out, `${me.uid}:${me.gid}`, transport);
+	const [container, net] = ['--name', '--network'].map((k) => run[run.indexOf(k) + 1]);
+	const args = ['--kill-after=10', String(seconds), a.docker, ...run];
 	log(`BDS Linux ${build.channel} ${build.build}: ${build.url}`);
 	if (a.dry_run) {
 		log(`would write ${path.join(out, 'capture.bin')}`);
 		log(`would run timeout ${args.join(' ')}`);
 		return 0;
 	}
-	await inspect.download(build, a.cache, log);
-	await nodeTarball(a.cache, log);
+	await fetchAll(build, a.cache, log);
 	const capture = path.join(out, 'capture.bin');
 	fs.mkdirSync(out, { recursive: true });
 	// A capture left by an earlier run would otherwise be reported as this run's.
 	fs.rmSync(capture, { force: true });
-	const r = spawnSync('timeout', args, { stdio: 'inherit' });
-	if (r.error) throw r.error;
-	log(`exit ${r.status}, ${fs.existsSync(capture) ? `capture ${capture}` : 'no capture'}`);
-	return r.status;
+	const trap = trapSignals();
+	let status;
+	try {
+		status = await onIsolatedNetwork(a.docker, net, container, log, () => timed(args, trap));
+	} finally {
+		trap.release();
+	}
+	log(`exit ${status}, ${fs.existsSync(capture) ? `capture ${capture}` : 'no capture'}`);
+	if (trap.signals.length) process.kill(process.pid, trap.signals[0]);
+	return status;
 }
 
 if (require.main === module) {
@@ -101,4 +220,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { SECONDS, NODE, nodeTarball, dockerArgs, main };
+module.exports = { SECONDS, NODE, pinnedFile, nodeTarball, lockProblems, npmTarballs, dockerArgs, trapSignals, timed, main };

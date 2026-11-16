@@ -42,7 +42,8 @@ jobs:
         run: node --test --test-name-pattern=live "tools/**/*.test.js"
 
   # The package's own checks, as its upstream CI ran them. bedrock-protocol is the only
-  # package with PHP checks of its own; the other three ship data.
+  # package with PHP checks of its own; the other three ship data, and only the two
+  # upgrade schema packages, below, carry a check upstream.
   bedrock-protocol:
     name: bedrock-protocol PHP checks
     runs-on: [self-hosted, linux, riftal]
@@ -77,3 +78,63 @@ jobs:
       - name: Run PHPUnit
         timeout-minutes: 10
         run: bash .github/php-ci/run.sh "$PACKAGE" php vendor/bin/phpunit --bootstrap vendor/autoload.php --fail-on-warning tests/phpunit
+
+      # tools/bds/decode.php decodes captures with this package, so its test runs here, on
+      # the package's dependencies as installed above. Nothing it needs is on the network,
+      # and it writes only to the container's own /tmp.
+      - name: Run the capture decoder's test
+        timeout-minutes: 5
+        run: docker run --rm --init --network none -m 1g --cpus 1 --user "$(id -u):$(id -g)" -v "$(realpath .):/repo:ro" -w /repo "$(cat "$RUNNER_TEMP/php-ci.iid")" php tools/bds/test/decode.test.php "/repo/$PACKAGE/vendor/autoload.php"
+
+      # Upstream's codegen job: regenerate every packet's create() methods, format them,
+      # and fail on any difference. Both tools write into the tree, so they run on a copy
+      # in the runner's temp directory, which is then compared with the checkout. The
+      # fixer runs as the runner's user there so nothing root-owned is left behind.
+      - name: Verify ::create() methods are up to date
+        timeout-minutes: 10
+        run: |
+          scratch="$RUNNER_TEMP/bedrock-protocol-codegen"
+          rm -rf "$scratch"
+          cp -a "$PACKAGE" "$scratch"
+          bash .github/php-ci/run.sh "$scratch" php tools/generate-create-static-methods.php
+          docker run --rm --init -m 1g --cpus 1 --user "$(id -u):$(id -g)" -v "$scratch:/code" -w /code "$PHP_CS_FIXER_IMAGE" fix --using-cache=no --show-progress=none
+          diff -ru --exclude=vendor "$PACKAGE" "$scratch"
+
+  # The upgrade schema packages' own check, as their upstream CI ran it.
+  upgrade-schemas:
+    name: ${{ matrix.package }} schema checks
+    runs-on: [self-hosted, linux, riftal]
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: bedrock-block-upgrade-schema
+            schemas: nbt_upgrade_schema
+            schema: nbt_upgrade_schema_schema.json
+            ajv-options: --allow-union-types
+          - package: bedrock-item-upgrade-schema
+            schemas: id_meta_upgrade_schema
+            schema: id_meta_upgrade_schema_schema.json
+            ajv-options: ""
+    env:
+      PACKAGE: packages/${{ matrix.package }}
+      SCHEMAS: ${{ matrix.schemas }}
+      SCHEMA: ${{ matrix.schema }}
+      AJV_OPTIONS: ${{ matrix.ajv-options }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Build the validator image
+        run: docker build --progress=plain --iidfile "$RUNNER_TEMP/schema-ci.iid" .github/schema-ci
+
+      - name: Validate upgrade schemas
+        run: |
+          # AJV_OPTIONS is unquoted so that it splits into separate options, or none.
+          # shellcheck disable=SC2086
+          docker run --rm --init -m 1g --cpus 1 --user "$(id -u):$(id -g)" \
+            -v "$(realpath .):/repo:ro" -w "/repo/$PACKAGE" \
+            "$(cat "$RUNNER_TEMP/schema-ci.iid")" \
+            sh /repo/.github/schema-ci/validate.sh "$SCHEMAS" "$SCHEMA" $AJV_OPTIONS

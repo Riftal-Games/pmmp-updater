@@ -1,0 +1,12 @@
+{
+	"format_version": 2,
+	"header": {
+		"name": "riftal block states",
+		"description": "Logs every block permutation BDS resolves, for tools/bds/script.js",
+		"uuid": "37889559-43e1-45a7-82a1-c4998b82310a",
+		"version": [1, 0, 0],
+		"min_engine_version": [1, 21, 90]
+	},
+	"modules": [{ "type": "script", "language": "javascript", "uuid": "01e2a6d7-fab2-47c6-b30a-0b94358f326e", "version": [1, 0, 0], "entry": "scripts/main.js" }],
+	"dependencies": [{ "module_name": "@minecraft/server", "version": "2.0.0" }]
+}

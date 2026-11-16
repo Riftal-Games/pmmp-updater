@@ -18,6 +18,7 @@ use PHPUnit\Framework\TestCase;
 use pmmp\encoding\ByteBufferReader;
 use pmmp\encoding\ByteBufferWriter;
 use pocketmine\network\mcpe\protocol\types\sound\AudioContentPlaybackType;
+use function array_map;
 
 final class PlaySoundPacketTest extends TestCase{
 
@@ -68,8 +69,8 @@ final class PlaySoundPacketTest extends TestCase{
 		self::assertNull($decoded->attachToActorRuntimeId);
 	}
 
-	public function testAudioContentConcurrentMusicByte() : void{
-		$bytes = "\xe7\x02\x01m\x01c\x02" . self::PAYLOAD_HEAD . "\x00\x01\x00\x00\x00\x3f\x00";
+	public function testAudioContentConcurrentMusicName() : void{
+		$bytes = "\xe7\x02\x01m\x01c\x0fconcurrentmusic" . self::PAYLOAD_HEAD . "\x00\x01\x00\x00\x00\x3f\x00";
 		$packet = ClientboundPlayAudioContentPacket::create("m", "c", AudioContentPlaybackType::CONCURRENT_MUSIC, self::packet(null, 0.5));
 		self::assertSame($bytes, self::encode($packet));
 
@@ -80,12 +81,19 @@ final class PlaySoundPacketTest extends TestCase{
 	}
 
 	public function testAudioContentCarriesAttachOptions() : void{
-		$bytes = "\xe7\x02\x01m\x01c\x00" . self::PAYLOAD_HEAD . "\x00\x00" . self::ATTACH_BYTES;
+		$bytes = "\xe7\x02\x01m\x01c\x05music" . self::PAYLOAD_HEAD . "\x00\x00" . self::ATTACH_BYTES;
 		$packet = ClientboundPlayAudioContentPacket::create("m", "c", AudioContentPlaybackType::MUSIC, self::packet(null, null, self::ACTOR_RUNTIME_ID));
 		self::assertSame($bytes, self::encode($packet));
 
 		$decoded = new ClientboundPlayAudioContentPacket();
 		$decoded->decode(new ByteBufferReader($bytes));
 		self::assertSame(self::ACTOR_RUNTIME_ID, $decoded->getPlaySound()->attachToActorRuntimeId);
+	}
+
+	public function testAudioContentPlaybackTypeIsTheLowercasedLabel() : void{
+		self::assertSame(["music", "sound", "concurrentmusic"], array_map(fn(AudioContentPlaybackType $t) => $t->value, AudioContentPlaybackType::cases()));
+
+		$this->expectException(PacketDecodeException::class);
+		AudioContentPlaybackType::fromPacket("ConcurrentMusic");
 	}
 }

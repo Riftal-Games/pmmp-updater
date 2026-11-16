@@ -31,7 +31,7 @@ final class InputAndSoundValuesTest extends TestCase{
 	public static function valuesProvider() : \Generator{
 		yield "GamePadAndMouse" => [InputMode::GAME_PAD_AND_MOUSE, InputMode::fromPacket(5)];
 		yield "MOTION_CONTROLLER" => [InputMode::MOTION_CONTROLLER, InputMode::fromPacket(4)];
-		yield "ConcurrentMusic" => [AudioContentPlaybackType::CONCURRENT_MUSIC, AudioContentPlaybackType::fromPacket(2)];
+		yield "ConcurrentMusic" => [AudioContentPlaybackType::CONCURRENT_MUSIC, AudioContentPlaybackType::fromPacket("concurrentmusic")];
 		yield "SwapOffhand input" => [65, PlayerAuthInputFlags::SWAP_OFFHAND];
 		yield "INTERNAL_UPDATE" => [65, PlayerAuthInputFlags::INTERNAL_UPDATE];
 		yield "NUMBER_OF_FLAGS" => [66, PlayerAuthInputFlags::NUMBER_OF_FLAGS];

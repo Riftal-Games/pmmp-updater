@@ -297,13 +297,15 @@ class Generator {
 	}
 
 	// The package's pattern for an enum sent by name: PersonaSkinPieceType in
-	// CommonTypes::getSkin, read with fromPacket(getString) and written as ->value.
+	// CommonTypes::getSkin, read with fromPacket(getString) and written as ->value. The name
+	// on the wire is the schema label lowercased, as the package sends FacialHair and
+	// ClearOverrides, and as Mojang's own schemas write a label in a const.
 	nameEnum(name, enumSchema, opts, where, key) {
 		const extra = [...opts].filter((o) => o !== 'allowunknownenumvalues');
 		if (extra.length) return todoType(this.note(where, `enum ${name} is sent as its name, with ${extra.join(', ')}, which the package has no pattern for`));
 		if (!this.types.has(name)) {
 			this.types.set(name, { kind: 'enum', key, asValue: false });
-			const cases = enumSchema.enum.map((v) => [upperSnake(v), phpString(v)]);
+			const cases = enumSchema.enum.map((v) => [upperSnake(v), phpString(String(v).toLowerCase())]);
 			this.files.set(`types/${name}.php`, renderEnum(name, 'string', 'PacketOrdinalEnumTrait', cases, false));
 		}
 		return {

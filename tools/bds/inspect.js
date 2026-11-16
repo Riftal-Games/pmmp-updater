@@ -9,9 +9,10 @@
 // Usage: node tools/bds/inspect.js [--channel release|preview] [--links-file <json>]
 //   [--cache <dir>] [--docker <command>] [--dry-run]
 //
-// Run it where docker is local: inside Ubuntu-26.04 on Nasir's PC that is
-//   wsl -d Ubuntu-26.04 -u runner --exec node /mnt/c/.../tools/bds/inspect.js
+// Run it where docker is local. For pmmp-updater#10's Stage 3 runs that is the BDS job in
+// .github/workflows/bds.yml, whose runner's docker is its own sidecar.
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -51,6 +52,22 @@ function selectBuild(json, channel) {
 	return { channel, build: m[2], url: link.downloadUrl, file: m[1] };
 }
 
+// A build the links no longer offer, such as the control's, at the URL they gave it,
+// checked as one they give now.
+function namedBuild(version, channel) {
+	if (!/^\d+\.\d+\.\d+\.\d+$/.test(version)) throw new Error(`--build must be four numbers, not ${version}`);
+	const url = `https://www.minecraft.net/bedrockdedicatedserver/bin-linux${channel === 'preview' ? '-preview' : ''}/bedrock-server-${version}.zip`;
+	return selectBuild({ result: { links: [{ downloadType: DOWNLOAD_TYPES[channel], downloadUrl: url }] } }, channel);
+}
+
+// Mojang publishes no hash for a BDS zip. Every run logs the one it used, and a build
+// carrying a sha256 refuses any other.
+function zipSha256(build, body) {
+	const got = crypto.createHash('sha256').update(body).digest('hex');
+	if (build.sha256 && got !== build.sha256) throw new Error(`BDS ${build.file}: sha256 ${got}, expected ${build.sha256}`);
+	return got;
+}
+
 function dockerArgs(build, cacheDir, probeDir) {
 	return [
 		'run', '--rm', '--name', `riftal_smoke_bds_inspect_${process.pid}`,
@@ -70,23 +87,24 @@ async function readLinks(a) {
 
 // Writes to a .part file and renames only once the whole body arrived and starts with a
 // zip header, so an interrupted download is never mistaken for a cached build.
-async function download(build, cacheDir, log) {
+async function download(build, cacheDir, log, get = fetch) {
 	const dest = path.join(cacheDir, build.file);
 	if (fs.existsSync(dest)) {
-		log(`cached ${dest}`);
+		log(`cached ${dest}, sha256 ${zipSha256(build, fs.readFileSync(dest))}`);
 		return dest;
 	}
 	fs.mkdirSync(cacheDir, { recursive: true });
 	log(`downloading ${build.url}`);
-	const res = await fetch(build.url, { signal: AbortSignal.timeout(600000) });
+	const res = await get(build.url, { signal: AbortSignal.timeout(600000) });
 	if (!res.ok) throw new Error(`BDS download: HTTP ${res.status}`);
 	const body = Buffer.from(await res.arrayBuffer());
 	const expected = Number(res.headers.get('content-length'));
 	if (expected && body.length !== expected) throw new Error(`BDS download: ${body.length} bytes, expected ${expected}`);
 	if (body.subarray(0, 4).toString('binary') !== 'PK\x03\x04') throw new Error('BDS download: not a zip');
+	const sha256 = zipSha256(build, body);
 	fs.writeFileSync(`${dest}.part`, body);
 	fs.renameSync(`${dest}.part`, dest);
-	log(`saved ${dest}, ${body.length} bytes`);
+	log(`saved ${dest}, ${body.length} bytes, sha256 ${sha256}`);
 	return dest;
 }
 
@@ -113,4 +131,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { LINKS_URL, IMAGE, DOWNLOAD_TYPES, parseArgs, selectBuild, readLinks, download, dockerArgs, main };
+module.exports = { LINKS_URL, IMAGE, DOWNLOAD_TYPES, parseArgs, selectBuild, namedBuild, readLinks, download, dockerArgs, main };

@@ -7,8 +7,9 @@
 // port: BDS from the read-only cache mount, tracer.js beside it in the same container on
 // the chosen transport, the capture written to <cache>/captures/<build>/capture.bin.
 //
-// Usage: node tools/bds/record.js [--channel release|preview] [--links-file <json>]
-//   [--cache <dir>] [--docker <command>] [--transport nethernet|raknet] [--dry-run]
+// Usage: node tools/bds/record.js [--channel release|preview] [--links-file <json> | --build <version>]
+//   [--sha256 <hex>] [--cache <dir>] [--docker <command>] [--transport nethernet|raknet] [--dry-run]
+// --build names a version in place of the one the links offer; --sha256 pins its zip.
 //
 // Run it where docker is local, as inspect.js says.
 
@@ -180,14 +181,22 @@ async function fetchInputs(build, cacheDir, log) {
 }
 
 async function main(argv, log = (s) => process.stdout.write(`${s}\n`), { seconds = SECONDS, fetchAll = fetchInputs } = {}) {
-	const at = argv.indexOf('--transport');
-	const transport = at < 0 ? 'nethernet' : argv[at + 1];
-	if (!['nethernet', 'raknet'].includes(transport)) throw new Error('--transport must be nethernet or raknet');
-	const a = inspect.parseArgs(at < 0 ? argv : [...argv.slice(0, at), ...argv.slice(at + 2)]);
-	const build = inspect.selectBuild(await inspect.readLinks(a), a.channel);
+	const own = { transport: 'nethernet' };
+	const rest = [];
+	for (let i = 0; i < argv.length; i++) {
+		if (!['--transport', '--build', '--sha256'].includes(argv[i])) rest.push(argv[i]);
+		else if (argv[i + 1] === undefined || argv[i + 1].startsWith('--')) throw new Error(`${argv[i]} needs a value`);
+		else own[argv[i].slice(2)] = argv[++i];
+	}
+	if (!['nethernet', 'raknet'].includes(own.transport)) throw new Error('--transport must be nethernet or raknet');
+	if ('sha256' in own && !/^[0-9a-f]{64}$/.test(own.sha256)) throw new Error('--sha256 must be 64 lowercase hex digits');
+	const a = inspect.parseArgs(rest);
+	if (own.build && a.links_file) throw new Error('--build and --links-file name the build twice');
+	const build = own.build ? inspect.namedBuild(own.build, a.channel) : inspect.selectBuild(await inspect.readLinks(a), a.channel);
+	if (own.sha256) build.sha256 = own.sha256;
 	const out = path.join(a.cache, 'captures', build.build);
 	const me = os.userInfo();
-	const run = dockerArgs(build, a.cache, out, `${me.uid}:${me.gid}`, transport);
+	const run = dockerArgs(build, a.cache, out, `${me.uid}:${me.gid}`, own.transport);
 	const [container, net] = ['--name', '--network'].map((k) => run[run.indexOf(k) + 1]);
 	const args = ['--kill-after=10', String(seconds), a.docker, ...run];
 	log(`BDS Linux ${build.channel} ${build.build}: ${build.url}`);

@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const fx = require('../../test-support/fixtures');
+const inspect = require('../inspect');
 const record = require('../record');
 
 const LINKS = { result: { links: [{ downloadType: 'serverBedrockLinux', downloadUrl: 'https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-9.8.7.6.zip' }] } };
@@ -65,6 +66,29 @@ test('a dry run names the capture path and runs docker under timeout', async () 
 	await record.main(['--transport', 'raknet', '--links-file', path.join(dir, 'links.json'), '--dry-run'], (s) => raknet.push(s));
 	assert.match(raknet[2], / raknet$/);
 	await assert.rejects(record.main(['--transport', 'quic', '--dry-run']), /nethernet or raknet/);
+});
+
+test('--build names the BDS version without reading the links, and --sha256 pins its zip', async () => {
+	const dir = fx.tempDir('bds-record');
+	const lines = [];
+	assert.equal(await record.main(['--build', '1.26.63.1', '--cache', path.join(dir, 'cache'), '--dry-run'], (s) => lines.push(s)), 0);
+	assert.equal(lines[0], 'BDS Linux release 1.26.63.1: https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.63.1.zip');
+	assert.equal(lines[1], `would write ${path.join(dir, 'cache', 'captures', '1.26.63.1', 'capture.bin')}`);
+	const pin = 'ab'.repeat(32);
+	let fetched;
+	const stop = async (b) => { fetched = b; throw new Error('fetched'); };
+	await assert.rejects(record.main(['--channel', 'preview', '--build', '1.26.70.24', '--sha256', pin, '--cache', path.join(dir, 'cache')], () => {}, { fetchAll: stop }), /^Error: fetched$/);
+	assert.deepEqual(fetched, { ...inspect.namedBuild('1.26.70.24', 'preview'), sha256: pin });
+	await assert.rejects(record.main(['--build', '1.26.63.1', '--cache', path.join(dir, 'cache')], () => {}, { fetchAll: stop }), /^Error: fetched$/);
+	assert.ok(!('sha256' in fetched));
+	fx.writeTree(dir, { 'links.json': LINKS });
+	for (const [argv, why] of [
+		[['--build', '1.26.63.1', '--links-file', path.join(dir, 'links.json')], /--build and --links-file/],
+		[['--build'], /--build needs a value/],
+		[['--build', '--dry-run'], /--build needs a value/],
+		[['--build', '1.26'], /four numbers/],
+		[['--sha256', 'AB'.repeat(32)], /--sha256 must be 64 lowercase hex digits/],
+	]) await assert.rejects(record.main([...argv, '--dry-run'], () => {}, { fetchAll: stop }), why, argv.join(' '));
 });
 
 // A stand-in docker that logs each call and answers as the test asks, so every path

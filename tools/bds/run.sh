@@ -53,9 +53,16 @@ sockets() {
 	awk 'FNR > 1 { print FILENAME, $2, $3, $4 }' /proc/net/tcp /proc/net/tcp6 /proc/net/udp /proc/net/udp6 >&2
 }
 
+# bds.log is Mojang's output. It stays in this container, which is removed with it, and
+# only the version BDS reports and its errors are printed, for the run's report.
+bds_log() {
+	echo "== bds.log: $(wc -l <bds.log) lines, its version and errors only" >&2
+	grep -aE 'Version: |ERROR\]' bds.log >&2 || true
+}
+
 LD_LIBRARY_PATH=. ./bedrock_server </dev/null >bds.log 2>&1 &
 if ! timeout 180 bash -c 'until grep -q "Server started" bds.log; do sleep 1; done'; then
-	cat bds.log >&2
+	bds_log
 	exit 1
 fi
 sockets "after Server started"
@@ -68,6 +75,5 @@ grep -qx 1 /proc/sys/net/ipv6/conf/eth0/disable_ipv6 && echo "== eth0 disable_ip
 status=0
 timeout 120 "$node" /tool/tracer.js --protocol-info /proto/protocol_info.json --out /out --transport "$4" || status=$?
 sockets "after the session"
-echo "== bds.log" >&2
-cat bds.log >&2
+bds_log
 exit "$status"

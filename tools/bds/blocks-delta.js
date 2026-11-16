@@ -5,7 +5,8 @@
 // build() takes the state set from the new version's structure palette and puts each state
 // BDS kept when placed at the network ID it sent, then every other state into the IDs left,
 // in the order our file gives it. Its report holds acceptance items a to d and f, each a list
-// of what failed, so the list is a MATCH only when every one of them is empty.
+// of what failed, and two lists outside them: the order rule's reversal, and how our file
+// and the old palette differ. The result is a MATCH only when every one of them is empty.
 // Item e is a run: the same build() on BDS 1.26.63.1's palettes and IDs against our
 // 1.26.60.6 file, whose states control() then compares with that file entry for entry.
 //
@@ -119,10 +120,11 @@ function build({ base, oldPalette, newPalette, sent }) {
 		const k = key(c);
 		if (!Number.isInteger(id) || id < 0) refuse(k, `was sent as ${id}, not an ID`);
 		else if (!entries.has(k)) refuse(k, `was sent as ${id} and is not in the new palette`);
+		else if (id >= entries.size) refuse(k, `was sent as ${id}, past the new palette's last ID ${entries.size - 1}`);
 		else if (ids.has(k) && ids.get(k) !== id) refuse(k, `was sent as ${ids.get(k)} and as ${id}`);
 		else ids.set(k, id);
 	}
-	const list = new Array(Math.max(entries.size, ...[...ids.values()].map((id) => id + 1))).fill(null);
+	const list = new Array(entries.size).fill(null);
 	for (const [k, id] of ids) {
 		if (list[id] === null) list[id] = k;
 		else refuse(k, `was sent as ${id}, which ${list[id]} holds`);
@@ -136,20 +138,39 @@ function build({ base, oldPalette, newPalette, sent }) {
 	}
 	const idOf = new Map(list.map((k, id) => [k, id]));
 
-	// Where our file orders the states both lists hold outside the changed blocks, the
-	// result must order them the same way, or our order no longer predicts BDS's.
-	const shared = (k) => k !== null && !changed.has(nameOf(k)) && ours.has(k);
-	const order = new Map(list.filter(shared).map((k, i) => [k, i]));
-	const predicted = new Map([...ours.keys()].filter((k) => order.has(k)).map((k, i) => [k, i]));
 	const d = [];
-	for (const k of list.filter(shared)) {
-		if (kept.has(k) && order.get(k) !== predicted.get(k)) d.push(`${k} was sent as ${ids.get(k)}, where our order does not put it`);
-	}
 	for (const k of inherited) {
 		const why = changed.has(nameOf(k)) ? 'its block changed' : !ours.has(k) ? 'it is not in our file'
-			: unsure.has(nameOf(k)) ? 'a state of its block is not at its sent ID' : order.get(k) !== predicted.get(k) ? 'it stands out of our order' : null;
+			: unsure.has(nameOf(k)) ? 'a state of its block is not at its sent ID' : null;
 		if (why) d.push(`${k} is inherited at ${idOf.get(k)}, but ${why}`);
 	}
+
+	// The order rule, whose reversal issuecomment-6868986975 names: outside the changed blocks,
+	// the states both lists hold stand in our file's order. Any that do not are listed, as the
+	// states outside one longest run in our order. Patience sorting finds that run, so of runs
+	// of equal length it keeps states with lower IDs in our file.
+	const shared = list.filter((k) => !changed.has(nameOf(k)) && ours.has(k));
+	const [tails, prev, inRun] = [[], new Map(), new Set()];
+	for (const k of shared) {
+		let [lo, hi] = [0, tails.length];
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			if (ours.get(tails[mid]) < ours.get(k)) lo = mid + 1;
+			else hi = mid;
+		}
+		prev.set(k, tails[lo - 1]);
+		tails[lo] = k;
+	}
+	for (let k = tails[tails.length - 1]; k !== undefined; k = prev.get(k)) inRun.add(k);
+	const order = shared.filter((k) => !inRun.has(k))
+		.map((k) => `${k} ${kept.has(k) ? `was sent as ${ids.get(k)}` : `is inherited at ${idOf.get(k)}`}, ours ${ours.get(k)}`);
+
+	// The base rests on BDS's old palette holding our file's states (issuecomment-6868011006),
+	// so where the two differ, this run is not evidence for a to f.
+	const full = (c) => `${key(c)} v${field(c, 'version')[2]}`;
+	const [inBase, inOld] = [new Set(base.map(full)), new Set(oldPalette.map(full))];
+	const differ = [...[...inBase].filter((k) => !inOld.has(k)).map((k) => `${k} is in our file, not the old palette`),
+		...[...inOld].filter((k) => !inBase.has(k)).map((k) => `${k} is in the old palette, not our file`)];
 
 	const byBlock = new Map();
 	const at = (n) => byBlock.get(n) || byBlock.set(n, { inherited: [], added: [], removed: [] }).get(n);
@@ -168,7 +189,8 @@ function build({ base, oldPalette, newPalette, sent }) {
 		d,
 		f: Object.values(blocksOut).flatMap((x) => x.added.filter((s) => s.id === null).map((s) => `${s.state} was added and has no sent ID`)),
 	};
-	const report = { match: Object.values(items).every((x) => x.length === 0), states: list.length, kept: kept.size, inherited: inherited.length, items, blocks: blocksOut };
+	const match = [...Object.values(items), order, differ].every((x) => x.length === 0);
+	const report = { match, states: list.length, kept: kept.size, inherited: inherited.length, items, order, base: differ, blocks: blocksOut };
 	return { states: list.map((k) => (k === null ? null : entries.get(k))), report };
 }
 
@@ -185,7 +207,10 @@ function control(got, ours) {
 
 function render(r) {
 	const lines = [`${r.states} IDs: ${r.kept} at the ID BDS sent, ${r.inherited} in our order`];
-	for (const [item, failed] of Object.entries(r.items)) lines.push(failed.length ? `${item}: MISMATCH (${failed.length})` : `${item}: holds`, ...failed.map((s) => `  ${s}`));
+	const part = (label, failed, what) => lines.push(failed.length ? `${label}: ${what} (${failed.length})` : `${label}: holds`, ...failed.map((s) => `  ${s}`));
+	for (const [item, failed] of Object.entries(r.items)) part(item, failed, 'MISMATCH');
+	part('order rule', r.order, 'REVERSED, our file no longer predicts BDS\'s order');
+	part('base', r.base, 'our file and the old palette differ, so this run is not evidence for a to f');
 	lines.push('f, by block:');
 	for (const [n, x] of Object.entries(r.blocks)) {
 		lines.push(`  ${n}:`);
@@ -193,7 +218,7 @@ function render(r) {
 		for (const s of x.added) lines.push(`    added ${s.state}, sent ${s.id ?? 'none'}`);
 		for (const s of x.removed) lines.push(`    removed ${s.state}, ours ${s.our_id ?? 'none'}`);
 	}
-	return [...lines, r.match ? 'MATCH' : 'MISMATCH'].join('\n');
+	return [...lines, r.match ? 'MATCH' : 'NOT MATCH'].join('\n');
 }
 
 module.exports = { key, encode, decode, build, control, render };

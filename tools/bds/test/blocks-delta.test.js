@@ -10,21 +10,22 @@ const delta = require('../blocks-delta');
 const OURS = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'packages', 'bedrock-data', 'canonical_block_states.nbt'));
 
 // Invented blocks, in the compound shape leveldb.nbt yields. fixture:frame gains a state,
-// fixture:gone is dropped and fixture:fresh is new, so the other three keep their sets.
+// fixture:stone keeps one state whose value changes type, fixture:gone is dropped and
+// fixture:fresh is new, so only air and lamp keep their sets.
 const state = (name, states = {}, version = 1) => [['name', 8, name], ['states', 10, Object.entries(states).map(([k, v]) => (typeof v === 'boolean' ? [k, 1, Number(v)] : typeof v === 'number' ? [k, 3, v] : [k, 8, v]))], ['version', 3, version]];
 const OLD = [
 	state('fixture:air'), state('fixture:lamp', { lit: false }), state('fixture:lamp', { lit: true }),
-	state('fixture:frame', { stability: 0 }), state('fixture:frame', { stability: 1 }), state('fixture:gone'), state('fixture:stone'),
+	state('fixture:frame', { stability: 0 }), state('fixture:frame', { stability: 1 }), state('fixture:gone'), state('fixture:stone', { x: 1 }),
 ];
 const NEW = [
 	state('fixture:air', {}, 2), state('fixture:lamp', { lit: false }, 2), state('fixture:lamp', { lit: true }, 2),
 	...[0, 1].flatMap((s) => [false, true].map((check) => state('fixture:frame', { stability: s, check }, 2))),
-	state('fixture:fresh', {}, 2), state('fixture:stone', {}, 2),
+	state('fixture:fresh', {}, 2), state('fixture:stone', { x: '1' }, 2),
 ];
 // BDS kept every new state when placed except the lit lamp, at its index in NEW.
 const SENT = NEW.map((c, id) => [c, id]).filter(([, id]) => id !== 2);
 const run = (over = {}) => delta.build({ base: OLD, oldPalette: [...OLD].reverse(), newPalette: [...NEW].reverse(), sent: SENT, ...over });
-const failed = (r) => Object.entries(r.report.items).filter(([, x]) => x.length).map(([k]) => k);
+const failed = (r) => [...Object.entries(r.report.items), ['order', r.report.order], ['base', r.report.base]].filter(([, x]) => x.length).map(([k]) => k);
 
 test('our file reads as samples.js reads it, and writes back byte for byte', () => {
 	const ours = delta.decode(OURS);
@@ -36,7 +37,7 @@ test('our file reads as samples.js reads it, and writes back byte for byte', () 
 
 test('kept states sit at their sent IDs, the rest fill the gaps in our order, with the new version', () => {
 	const r = run();
-	assert.deepEqual(r.report.items, { a: [], b: [], c: [], d: [], f: [] });
+	assert.deepEqual([r.report.items, r.report.order, r.report.base], [{ a: [], b: [], c: [], d: [], f: [] }, [], []]);
 	assert.equal(r.report.match, true);
 	assert.deepEqual(r.states.map(delta.key), NEW.map(delta.key));
 	assert.ok(delta.encode(r.states).equals(delta.encode(NEW)));
@@ -46,35 +47,42 @@ test('kept states sit at their sent IDs, the rest fill the gaps in our order, wi
 	assert.deepEqual(r.report.blocks['fixture:frame'].removed, [{ state: 'fixture:frame[stability=i:0]', our_id: 3 }, { state: 'fixture:frame[stability=i:1]', our_id: 4 }]);
 	assert.deepEqual(r.report.blocks['fixture:gone'], { inherited: [], added: [], removed: [{ state: 'fixture:gone[]', our_id: 5 }] });
 	assert.deepEqual(r.report.blocks['fixture:fresh'].added, [{ state: 'fixture:fresh[]', id: 7 }]);
-	assert.deepEqual(Object.keys(r.report.blocks), ['fixture:frame', 'fixture:fresh', 'fixture:gone', 'fixture:lamp']);
+	assert.deepEqual(r.report.blocks['fixture:stone'], { inherited: [], added: [{ state: 'fixture:stone[x=s:"1"]', id: 8 }], removed: [{ state: 'fixture:stone[x=i:1]', our_id: 6 }] });
+	assert.deepEqual(Object.keys(r.report.blocks), ['fixture:frame', 'fixture:fresh', 'fixture:gone', 'fixture:lamp', 'fixture:stone']);
 	const text = delta.render(r.report);
 	assert.match(text, /^9 IDs: 8 at the ID BDS sent, 1 in our order$/m);
 	assert.match(text, /^ {4}inherited fixture:lamp\[lit=b:1\] at 2$/m);
 	assert.match(text, /^ {4}removed fixture:gone\[\], ours 5$/m);
+	assert.match(text, /^order rule: holds\nbase: holds$/m);
 	assert.match(text, /\nMATCH$/);
 });
 
-test('each acceptance item fails on its own and names its states', () => {
+test('each acceptance item, the order rule and the base fail on their own and name their states', () => {
 	const without = (name) => SENT.filter(([c]) => delta.key(c) !== name);
+	const swapped = SENT.map(([c, id]) => [c, id < 2 ? 1 - id : id]);
 	const cases = [
 		[{ sent: without('fixture:frame[check=b:1,stability=i:1]') }, ['a', 'd', 'f'], /fixture:frame\[check=b:1,stability=i:1\] was not sent, and its block changed/],
 		[{ sent: [...SENT, [OLD[5], 9]] }, ['b'], /fixture:gone\[\] was sent as 9 and is not in the new palette/],
 		[{ sent: [...SENT, [NEW[2], 1]] }, ['b', 'd'], /fixture:lamp\[lit=b:1\] was sent as 1, which fixture:lamp\[lit=b:0\] holds/],
 		[{ sent: [...SENT, [NEW[1], 4]] }, ['b', 'd'], /fixture:lamp\[lit=b:0\] was sent as 1 and as 4/],
-		[{ sent: SENT.map(([c, id]) => [c, id === 8 ? 10 : id]) }, ['c'], /^8 names no state$/],
-		[{ sent: SENT.map(([c, id]) => [c, id < 2 ? 1 - id : id]) }, ['d'], /fixture:lamp\[lit=b:0\] was sent as 0, where our order does not put it/],
-		[{ base: OLD.filter((_, i) => i !== 2) }, ['d'], /fixture:lamp\[lit=b:1\] is inherited at 2, but it is not in our file/],
+		[{ sent: [...SENT, [NEW[0], 0.5]] }, ['b'], /fixture:air\[\] was sent as 0.5, not an ID/],
+		[{ sent: SENT.map(([c, id]) => [c, id === 0 ? 10 : id]) }, ['b', 'd'], /fixture:air\[\] was sent as 10, past the new palette's last ID 8/],
+		[{ sent: swapped }, ['order'], /^fixture:lamp\[lit=b:0\] was sent as 0, ours 1$/],
+		[{ base: OLD.filter((_, i) => i !== 2) }, ['d', 'base'], /fixture:lamp\[lit=b:1\] is inherited at 2, but it is not in our file/],
 		[{ sent: without('fixture:fresh[]') }, ['a', 'd', 'f'], /fixture:fresh\[\] was added and has no sent ID/],
+		[{ base: [...OLD, state('fixture:ghost')] }, ['base'], /^fixture:ghost\[\] v1 is in our file, not the old palette$/],
+		[{ base: OLD.filter((_, i) => i !== 5) }, ['base'], /^fixture:gone\[\] v1 is in the old palette, not our file$/],
 	];
 	for (const [over, items, line] of cases) {
 		const r = run(over);
 		assert.deepEqual(failed(r), items, `${line}`);
 		assert.equal(r.report.match, false);
 		const text = delta.render(r.report);
-		assert.match(text, /\nMISMATCH$/);
+		assert.match(text, /\nNOT MATCH$/);
 		assert.ok(text.split('\n').some((l) => line.test(l.trim())), `${line} in\n${text}`);
 	}
-	assert.match(delta.render(run({ sent: SENT.map(([c, id]) => [c, id === 8 ? 10 : id]) }).report), /^c: MISMATCH \(2\)\n {2}8 names no state\n {2}9 names no state$/m);
+	assert.match(delta.render(run({ sent: swapped }).report), /^d: holds\nf: holds\norder rule: REVERSED, our file no longer predicts BDS's order \(1\)\n {2}fixture:lamp/m);
+	assert.match(delta.render(run({ base: [] }).report), /^base: our file and the old palette differ, so this run is not evidence for a to f \(7\)$/m);
 });
 
 test('a state the tool cannot key, or a palette at two versions of one state, is refused', () => {
@@ -83,19 +91,31 @@ test('a state the tool cannot key, or a palette at two versions of one state, is
 	assert.throws(() => run({ newPalette: [[['name', 8, 'fixture:air'], ['version', 3, 1]]] }), /a state has no states/);
 });
 
-// The shape of item e, on our own file standing in for both palettes: every state but a few
-// sent at its own ID gives the file back entry for entry. Two kept states sent at each
-// other's IDs is a change of Mojang's order rule, which d and the control both name.
+// The shape of item e, on our own file standing in for both palettes: every state but each
+// seventh sent at its own ID gives the file back entry for entry. The kept states at 11 and
+// 12 sent at each other's IDs fire the order rule, which names one of them, and the control
+// names both entries.
 test('the control shape: our file through build() comes back entry for entry, and a swap is named', () => {
 	const ours = delta.decode(OURS);
 	const sent = ours.map((c, id) => [c, id]).filter(([, id]) => id % 7 !== 3);
 	const same = delta.build({ base: ours, oldPalette: ours, newPalette: [...ours].reverse(), sent });
 	assert.equal(same.report.match, true);
 	assert.deepEqual(delta.control(same.states, ours), []);
-	const swapped = sent.map(([c, id]) => [c, id === 10 ? 11 : id === 11 ? 10 : id]);
+	const swapped = sent.map(([c, id]) => [c, id === 11 ? 12 : id === 12 ? 11 : id]);
 	const r = delta.build({ base: ours, oldPalette: ours, newPalette: ours, sent: swapped });
-	assert.deepEqual(failed(r), ['d']);
-	assert.equal(r.report.items.d.length, 2);
-	assert.deepEqual(delta.control(r.states, ours).map((l) => l.split(':')[0]), ['10', '11']);
+	assert.deepEqual(failed(r), ['order']);
+	assert.deepEqual(r.report.order, [`${delta.key(ours[12])} was sent as 11, ours 12`]);
+	assert.deepEqual(delta.control(r.states, ours).map((l) => l.split(':')[0]), ['11', '12']);
 	assert.match(delta.control(ours.slice(0, 2), ours.slice(0, 1))[0], /^1: got .* v\d+, ours none$/);
+});
+
+// One kept state sent five places on, past states BDS did not send, moves every state
+// between; the order rule fires and names only the state that moved.
+test('one kept state moved several places fires the order rule', () => {
+	const ours = delta.decode(OURS);
+	const sent = ours.map((c, id) => [c, id]).filter(([, id]) => id === 0 || id > 5).map(([c, id]) => [c, id || 5]);
+	const r = delta.build({ base: ours, oldPalette: ours, newPalette: ours, sent });
+	assert.deepEqual(failed(r), ['order']);
+	assert.deepEqual(r.report.order, [`${delta.key(ours[0])} was sent as 5, ours 0`]);
+	assert.deepEqual(delta.control(r.states, ours).map((l) => l.split(':')[0]), ['0', '1', '2', '3', '4', '5']);
 });

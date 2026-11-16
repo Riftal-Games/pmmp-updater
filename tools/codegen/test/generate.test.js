@@ -7,7 +7,7 @@ const path = require('path');
 const docs = require('../../lib/mojang-docs');
 const pkg = require('../../lib/packages');
 const fx = require('../../test-support/fixtures');
-const { run, generate, parseArgs, camel, upperSnake, TODO } = require('../generate');
+const { run, generate, parseArgs, camel, upperSnake, className, TODO } = require('../generate');
 const { parse } = require('./php-shape');
 
 const P = 500;
@@ -143,13 +143,15 @@ test('enums under Enum-as-Value become int-backed enums carrying Mojang binary v
 	assert.deepEqual(parse(r.files.get('types/AlphaKind.php')).cases, [{ name: 'PLAIN', value: '0' }, { name: 'FANCY', value: '4' }]);
 });
 
-test('enums without Enum-as-Value go on the wire as their names, through string-backed enums', () => {
+test('enums without Enum-as-Value go on the wire as their lowercased names, through string-backed enums', () => {
 	const r = gen(['ClientboundAlphaPacket']);
 	assert.deepEqual(parse(r.files.get('types/Shade.php')), {
 		kind: 'enum', namespace: 'pocketmine\\network\\mcpe\\protocol\\types', name: 'Shade', backing: 'string', traits: ['PacketOrdinalEnumTrait'],
-		cases: [{ name: 'LIGHT', value: "'Light'" }, { name: 'DARK_GREY', value: "'Dark Grey'" }],
+		cases: [{ name: 'LIGHT', value: "'light'" }, { name: 'DARK_GREY', value: "'dark grey'" }],
 	});
-	assert.deepEqual(parse(r.files.get('types/AlphaTone.php')).cases, [{ name: 'WARM', value: "'Warm'" }, { name: 'COOL', value: "'Cool'" }]);
+	assert.deepEqual(parse(r.files.get('types/AlphaTone.php')).cases, [{ name: 'WARM', value: "'warm'" }, { name: 'COOL', value: "'cool'" }]);
+	const mode = gen(['ClientboundAlphaPacket'], { ClientboundAlphaPacketPayload: { type: 'object', properties: { Mode: at(0, { $ref: './Mode.json' }) }, required: ['Mode'] } });
+	assert.deepEqual(parse(mode.files.get('types/Mode.php')).cases.map((c) => c.value), ["'off'", "'on'", "'automode'"], 'a PascalCase label loses its capitals and nothing else');
 	const text = r.files.get('ClientboundAlphaPacket.php');
 	assert.match(text, /\$this->shade = Shade::fromPacket\(CommonTypes::getString\(\$in\)\);/);
 	assert.match(text, /CommonTypes::putString\(\$out, \$this->shade->value\);/);
@@ -346,18 +348,7 @@ const TOLERATED = {
 	ordinalEnums: ['MatchmakingState'],
 	// Ours has constructor parameters that are not readonly.
 	notReadonly: ['MatchmakingStateOptions'],
-	// Unverified, pmmp-updater#15. Mojang's schema gives every field of these enums no
-	// Enum-as-Value, so codegen sends the name as a string; ours, from upstream axolotl-pm,
-	// sends the binary value as a byte. One of the two is wrong on the wire. The test maps
-	// codegen's string calls onto ours and reports each place it did so; settling #15
-	// removes the entry or fixes the package.
-	nameOnWire: {
-		AudioContentPlaybackType: { issue: 'pmmp-updater#15', read: 'Byte::readUnsigned', write: 'Byte::writeUnsigned' },
-	},
 };
-
-// Every place the live test maps a TOLERATED.nameOnWire difference, so none goes unseen.
-const NAME_ON_WIRE_REPORTED = ['ClientboundPlayAudioContentPacket.playbackType', 'types/AudioContentPlaybackType.php'];
 
 const EXPECTED_FILES = [
 	'ClientboundMatchmakingStatePacket.php', 'ClientboundPlayAudioContentPacket.php', 'ClientboundStonecutterSetRecipePacket.php',
@@ -375,7 +366,7 @@ function renameTypes(shape) {
 
 const BODIES = ['decode', 'encode', 'read', 'write'];
 
-function tolerate(genShape, handShape, reported) {
+function tolerate(genShape, handShape) {
 	const g = renameTypes(genShape);
 	const h = JSON.parse(JSON.stringify(handShape));
 	const names = TOLERATED.fieldNames[g.name] || {};
@@ -390,22 +381,6 @@ function tolerate(genShape, handShape, reported) {
 			h[`${k}Targets`] = h[`${k}Targets`].filter((_, i) => keep[i]);
 		}
 	}
-	for (const p of [...(g.properties || []), ...(g.ctor || [])]) {
-		const type = p.type.replace(/^\?/, '');
-		const entry = TOLERATED.nameOnWire[type];
-		if (!entry) continue;
-		const map = { 'CommonTypes::getString': entry.read, 'CommonTypes::putString': entry.write };
-		let mapped = false;
-		for (const k of BODIES) {
-			if (!g[k]) continue;
-			g[k] = g[k].map((c, i) => {
-				if (g[`${k}Targets`][i] !== p.name || !map[c]) return c;
-				mapped = true;
-				return map[c];
-			});
-		}
-		if (mapped && !reported.some((d) => d.where === `${g.name}.${p.name}`)) reported.push({ where: `${g.name}.${p.name}`, type });
-	}
 	return { g, h };
 }
 
@@ -413,14 +388,13 @@ function tolerate(genShape, handShape, reported) {
 // drafts come from the tag the package was brought to, not from the one that added them.
 const PACKAGE_TAG = 'v1.26.70-preview.24';
 
-test('live: codegen redrafts the 8 packets new in 1.26.60 as the hand-written classes, up to the listed differences', { skip: !process.env.RIFTAL_LIVE }, (t) => {
+test('live: codegen redrafts the 8 packets new in 1.26.60 as the hand-written classes, up to the listed differences', { skip: !process.env.RIFTAL_LIVE }, () => {
 	const out = fx.tempDir('codegen-live');
 	const added = docs.diffDocs(docs.loadDocs(docs.checkout('v1.26.50')), docs.loadDocs(docs.checkout('v1.26.60'))).packets.added.map((p) => p.name);
 	assert.equal(added.length, 8);
 	const r = run({ ...parseArgs([...added.flatMap((n) => ['--packet', n]), '--tag', PACKAGE_TAG, '--out', out]) });
 	assert.deepEqual(r.todos, []);
 	assert.deepEqual([...r.files.keys()].sort(), [...EXPECTED_FILES].sort());
-	const reported = [];
 	for (const [rel, text] of r.files) {
 		const genShape = parse(text);
 		const ours = TOLERATED.typeNames[genShape.name] || genShape.name;
@@ -428,18 +402,9 @@ test('live: codegen redrafts the 8 packets new in 1.26.60 as the hand-written cl
 		const handShape = parse(fs.readFileSync(path.join(pkg.PROTOCOL_SRC, ...sub, `${ours}.php`), 'utf8'));
 		assert.equal(handShape.namespace, ['pocketmine\\network\\mcpe\\protocol', ...sub].join('\\'), rel);
 		if (genShape.kind === 'enum') {
-			if (TOLERATED.nameOnWire[ours]) {
-				assert.equal(genShape.backing, 'string', rel);
-				assert.deepEqual(genShape.traits, ['PacketOrdinalEnumTrait'], rel);
-				assert.equal(handShape.backing, 'int', rel);
-				assert.deepEqual(handShape.traits, ['PacketIntEnumTrait'], rel);
-				assert.deepEqual(genShape.cases.map((c) => c.name), handShape.cases.map((c) => c.name), rel);
-				reported.push({ where: rel, type: ours });
-				continue;
-			}
-			assert.equal(genShape.backing, 'int', rel);
-			assert.deepEqual(genShape.traits, ['PacketIntEnumTrait'], rel);
 			if (TOLERATED.ordinalEnums.includes(ours)) {
+				assert.equal(genShape.backing, 'int', rel);
+				assert.deepEqual(genShape.traits, ['PacketIntEnumTrait'], rel);
 				assert.equal(handShape.backing, 'string', rel);
 				assert.deepEqual(handShape.traits, ['PacketOrdinalEnumTrait'], rel);
 				assert.deepEqual(genShape.cases.map((c) => c.name), handShape.cases.map((c) => c.name), rel);
@@ -451,11 +416,48 @@ test('live: codegen redrafts the 8 packets new in 1.26.60 as the hand-written cl
 		}
 		assert.equal(genShape.final, true, rel);
 		assert.equal(handShape.final, !TOLERATED.notFinal.includes(ours), rel);
-		const { g, h } = tolerate(genShape, handShape, reported);
+		const { g, h } = tolerate(genShape, handShape);
 		assert.deepEqual(project(g), project(h), rel);
 	}
-	assert.deepEqual(reported.map((d) => d.where).sort(), [...NAME_ON_WIRE_REPORTED].sort());
-	for (const { where, type } of reported) {
-		t.diagnostic(`DIFFERS, unverified (${TOLERATED.nameOnWire[type].issue}): ${where}: codegen sends ${type} as its name string, the package sends its value as a byte`);
+});
+
+// Enums the package sends by name, each with the schema it follows. Every one is
+// referenced somewhere in the tag without Enum-as-Value, and the package's own values
+// are what codegen's name enums must reproduce.
+const PACKAGE_NAME_ENUMS = {
+	ResourcePackResponse: 'types/ResourcePackClientResponseStatus.php',
+	UpdateType: 'types/OverrideUpdateType.php',
+	ScorePacketEntryAction: 'types/ScorePacketEntryAction.php',
+	CommandPermissionLevel: 'types/command/CommandPermissions.php',
+	persona__PieceType: 'types/skin/PersonaSkinPieceType.php',
+	AudioContentPlaybackType: 'types/sound/AudioContentPlaybackType.php',
+};
+
+function refsByName(node, stem, out = []) {
+	if (!node || typeof node !== 'object') return out;
+	if (node.$ref === `./${stem}.json`) out.push(node);
+	for (const v of Object.values(node)) refsByName(v, stem, out);
+	return out;
+}
+
+test('live: codegen\'s name enums carry the wire names the package sends', { skip: !process.env.RIFTAL_LIVE }, () => {
+	const loaded = docs.loadDocs(docs.checkout(PACKAGE_TAG));
+	const stems = Object.keys(PACKAGE_NAME_ENUMS);
+	for (const stem of stems) {
+		const refs = [...loaded.schemas.values()].flatMap((s) => refsByName(s, stem));
+		assert.ok(refs.some((ref) => !(ref['x-serialization-options'] || []).includes('Enum-as-Value')), `${stem} is sent by name somewhere`);
+	}
+	const probe = 'ClientboundCasingProbePacket';
+	loaded.schemas.set(probe, fx.packet(probe, 9999, loaded.protocol));
+	loaded.schemas.set(`${probe}Payload`, { type: 'object', properties: Object.fromEntries(stems.map((s, i) => [s, at(i, { $ref: `./${s}.json` })])), required: stems });
+	loaded.packets.set(probe, { id: 9999, file: probe, details: null });
+	const r = generate(loaded, [probe]);
+	assert.deepEqual(r.todos, []);
+	const unquote = (v) => v.replace(/^(['"])(.*)\1$/, '$2');
+	for (const [stem, rel] of Object.entries(PACKAGE_NAME_ENUMS)) {
+		const genShape = parse(r.files.get(`types/${className(loaded.schemas.get(stem), stem)}.php`));
+		const handShape = parse(fs.readFileSync(path.join(pkg.PROTOCOL_SRC, ...rel.split('/')), 'utf8'));
+		assert.equal(handShape.backing, 'string', rel);
+		assert.deepEqual(genShape.cases.map((c) => unquote(c.value)), handShape.cases.map((c) => unquote(c.value)), rel);
 	}
 });

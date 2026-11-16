@@ -89,6 +89,7 @@ test('reads version, packet names and the newest content delta from a client tre
 	assert.deepEqual(s.packet_limit_ids, [4, 9]);
 	assert.deepEqual(s.behavior_delta.introduced, { entities: ['owl.json'], loot_tables: ['owl.json'] });
 	assert.deepEqual(s.resource_delta.changed, { 'textures/blocks': ['owl_egg.png'] });
+	assert.match(scan.render(s), /^Core checkout pins: no sibling PocketMine-MP or pmmp-core checkout$/m);
 });
 
 test('decorated MSVC names collapse onto the real class name', () => {

@@ -32,11 +32,18 @@ function constantStem(packetName) {
 	return packetName.replace(/Packet$/, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2').toUpperCase();
 }
 
-// What the sibling pmmp-core checkout pins, which is what the server image actually
-// speaks. Null when there is no checkout next to this one. A package composer resolves
-// from a path repository has a dist and no source, so its source is the dist type and
-// url, for example "path deps/pmmp-updater/packages/bedrock-protocol".
-function corePin(coreDir = path.join(REPO, '..', 'pmmp-core')) {
+// The core checkout next to this one. Its folder is named PocketMine-MP after its
+// repository, or pmmp-core; PocketMine-MP wins when both exist.
+function siblingCoreDir(parent = path.join(REPO, '..')) {
+	const named = path.join(parent, 'PocketMine-MP');
+	return fs.existsSync(named) ? named : path.join(parent, 'pmmp-core');
+}
+
+// What the core checkout pins, which is what the server image actually speaks. Null
+// when there is no checkout there. A package composer resolves from a path repository
+// has a dist and no source, so its source is the dist type and url, for example
+// "path deps/pmmp-updater/packages/bedrock-protocol".
+function corePin(coreDir = siblingCoreDir()) {
 	const lockFile = path.join(coreDir, 'composer.lock');
 	if (!fs.existsSync(lockFile)) return null;
 	const entry = JSON.parse(fs.readFileSync(lockFile, 'utf8')).packages.find((p) => p.name === 'axolotl-pm/bedrock-protocol');
@@ -51,4 +58,4 @@ function pinSource(entry) {
 	return null;
 }
 
-module.exports = { REPO, PROTOCOL_SRC, readProtocolInfo, packetClasses, constantStem, corePin };
+module.exports = { REPO, PROTOCOL_SRC, readProtocolInfo, packetClasses, constantStem, siblingCoreDir, corePin };

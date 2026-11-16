@@ -119,3 +119,30 @@ test('one kept state moved several places fires the order rule', () => {
 	assert.deepEqual(r.report.order, [`${delta.key(ours[0])} was sent as 5, ours 0`]);
 	assert.deepEqual(delta.control(r.states, ours).map((l) => l.split(':')[0]), ['0', '1', '2', '3', '4', '5']);
 });
+
+// fixture:grow gains n=3 and keeps n=0 to 2, the shape a block that grows a property takes.
+// The order rule leaves its block out, and an unsent kept state is inherited for that reason.
+test('a block that gains a state and keeps its old ones', () => {
+	const old = [state('fixture:air'), ...[0, 1, 2].map((n) => state('fixture:grow', { n }))];
+	const now = [state('fixture:air', {}, 2), ...[0, 1, 2, 3].map((n) => state('fixture:grow', { n }, 2))];
+	const grow = (sent) => delta.build({ base: old, oldPalette: old, newPalette: now, sent });
+	const r = grow(now.map((c, id) => [c, id === 1 ? 2 : id === 2 ? 1 : id]));
+	assert.deepEqual(failed(r), []);
+	assert.deepEqual(r.report.order, []);
+	assert.equal(r.report.match, true);
+	const unsent = grow(now.map((c, id) => [c, id]).filter(([, id]) => id !== 2));
+	assert.deepEqual(failed(unsent), ['a', 'd']);
+	assert.deepEqual(unsent.report.items.d, ['fixture:grow[n=i:1] is inherited at 2, but its block changed']);
+});
+
+test('the control names an entry that differs from ours only in version, or only in the order of its states', () => {
+	const ours = delta.decode(OURS);
+	const one = (i, c) => delta.control(ours.map((x, j) => (j === i ? c : x)), ours);
+	const [v, version] = [3, ours[3].find(([k]) => k === 'version')[2]];
+	const s = ours.findIndex((c) => c.find(([k]) => k === 'states')[2].length > 1);
+	const bumped = one(v, ours[v].map(([k, t, x]) => [k, t, k === 'version' ? x + 1 : x]));
+	assert.deepEqual(bumped.map((l) => l.split(':')[0]), [`${v}`]);
+	assert.match(bumped[0], new RegExp(` v${version + 1}, ours .* v${version}$`));
+	const reordered = one(s, ours[s].map(([k, t, x]) => [k, t, k === 'states' ? [...x].reverse() : x]));
+	assert.deepEqual(reordered.map((l) => l.split(':')[0]), [`${s}`]);
+});

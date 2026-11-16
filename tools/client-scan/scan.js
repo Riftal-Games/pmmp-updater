@@ -288,7 +288,7 @@ function render(snapshot, previous) {
 	out.push(`Client: Bedrock ${c.game_version}, package ${c.package_version}, exe ${c.exe_file_version}, protocol ${c.protocol ? `${c.protocol.protocol} (Mojang ${c.protocol.tag})` : 'unconfirmed'}`);
 	out.push(`Our packages: ${snapshot.packages.version}, protocol ${snapshot.packages.protocol}`);
 	const core = snapshot.core_pin;
-	out.push(`pmmp-core checkout pins: ${core ? `${core.package_version} from ${core.source}` : 'no sibling pmmp-core checkout'}`);
+	out.push(`Core checkout pins: ${core ? `${core.package_version} from ${core.source}` : 'no sibling PocketMine-MP or pmmp-core checkout'}`);
 	out.push(`Verdict: ${snapshot.verdict}`);
 	out.push('');
 	out.push(`## Client packet names with no class in our packages (${snapshot.not_in_packages.length})`);

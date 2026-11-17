@@ -150,6 +150,9 @@ $entry = fn(int $id) => new T\UpdateSubChunkBlocksPacketEntry(new T\BlockPositio
 $updates = $record($update) . $record(P\UpdateSubChunkBlocksPacket::create(new T\BlockPosition(-16, 0, 0), [$entry(7)], [$entry(8)])) . $record($update);
 [$status, $out, $err] = $decode($updates, $protocol);
 $check($status === 0 && (json_decode($out, true)['block_updates'] ?? null) === [[1, -2, 3, 23959, 2, 0], [-4, 5, 6, 7, 3, 0], [-4, 5, 6, 8, 3, 1], [1, -2, 3, 23959, 2, 0]], 'block updates are kept in order with their layer', "exit $status, $out, $err");
+$liquid = P\UpdateBlockPacket::create(new T\BlockPosition(1, -2, 3), 23960, P\UpdateBlockPacket::FLAG_NETWORK, P\UpdateBlockPacket::DATA_LAYER_LIQUID);
+[$status, $out, $err] = $decode($record($update) . $record($liquid), $protocol);
+$check($status === 0 && (json_decode($out, true)['block_updates'] ?? null) === [[1, -2, 3, 23959, 2, 0], [1, -2, 3, 23960, 2, 1]], 'an UpdateBlockPacket on the liquid layer keeps layer 1', "exit $status, $out, $err");
 
 foreach([
 	'runs past the end of the capture' => substr($capture, 0, -1),

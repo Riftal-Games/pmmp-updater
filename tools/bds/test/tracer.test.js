@@ -102,8 +102,10 @@ for (const bedrockCipher of [false, true]) {
 // A server stood in for with --blocks: StartGamePacket of unique ID -3 and runtime ID 7,
 // then chunk -2, 2, whose sub-chunk request is answered with `entries` entries. With
 // `late`, VoxelShapesPacket comes only once the client has been quiet for longer than
-// QUIET, here 50 ms.
-async function blocksSession(entries, deadline, late = false) {
+// QUIET, here 50 ms. `answer` replaces the reply to a packet ID with [ID, bytes] pairs, and
+// each `later` entry [request ID, ms, ID, bytes] sends one more packet ms after that request.
+// `timeline` holds the IDs the client sent and, as `<ID`, each `later` packet once sent.
+async function blocksSession(entries, deadline, late = false, { answer = {}, later = [] } = {}) {
 	const ids = Object.fromEntries([['LoginPacket', 1], ['PlayStatusPacket', 2], ['ServerToClientHandshakePacket', 3], ['ClientToServerHandshakePacket', 4], ['TextPacket', 9], ['LevelChunkPacket', 58], ['RequestChunkRadiusPacket', 69], ['SetLocalPlayerAsInitializedPacket', 113], ['NetworkSettingsPacket', 143], ['SubChunkPacket', 174], ['SubChunkRequestPacket', 175], ['RequestNetworkSettingsPacket', 193], ...t.WANTED.map((n, i) => [n, n === 'StartGamePacket' ? 11 : 300 + i])]);
 	const out = fs.mkdtempSync(path.join(os.tmpdir(), 'tracer-'));
 	fs.writeFileSync(path.join(out, 'info.json'), JSON.stringify({ version: INFO.version, packets: ids }));
@@ -117,16 +119,21 @@ async function blocksSession(entries, deadline, late = false) {
 		175: [pk(174, [0, 0, ...Array(12).fill(0), entries])],
 		113: [pk(9, 'RIFTAL_DONE')],
 	};
-	const [sent, lines, state] = [[], [], { compressed: true }];
+	for (const [id, packets] of Object.entries(answer)) answers[id] = packets.map(([i, bytes]) => pk(i, bytes));
+	const [sent, lines, state, timeline] = [[], [], { compressed: true }, []];
 	let deliver = null;
 	const send = (batch) => {
 		const [p] = sent.length ? t.decodeBatch(batch, state) : [{ id: 193 }];
 		sent.push(p);
+		timeline.push(p.id);
 		setImmediate(() => deliver(sent.length === 1 ? t.encodeBatch([t.varint(143)], {}) : t.encodeBatch(answers[p.id] || [], state)));
 		if (late && p.id === 175) setTimeout(() => deliver(t.encodeBatch([voxels], state)), 200);
+		for (const [after, ms, id, bytes] of later) {
+			if (p.id === after) setTimeout(() => { timeline.push(`<${id}`); deliver(t.encodeBatch([pk(id, bytes)], state)); }, ms);
+		}
 	};
 	const code = await t.trace({ protocol_info: path.join(out, 'info.json'), out, port: 19132, deadline, blocks: true, quiet: 50 }, (s) => lines.push(s), { send, close() {}, open: async (m) => { deliver = m; } });
-	return { code, sent, lines, ids, pk };
+	return { code, sent, lines, ids, pk, timeline };
 }
 
 test('with --blocks it asks for each chunk\'s sub-chunks, says it is initialised once all are answered, and ends on the pack\'s chat line', async () => {
@@ -151,6 +158,25 @@ test('with --blocks a sub-chunk left unanswered keeps the pack from starting, an
 test('with --blocks a WANTED packet that comes after the sub-chunks still lets it say it is initialised', async () => {
 	const { code, sent } = await blocksSession(24, 3, true);
 	assert.deepEqual([code, sent.map((p) => p.id)], [0, [193, 1, 4, 69, 175, 113]]);
+});
+
+test('with --blocks it says it is initialised only once PlayStatus PLAYER_SPAWN has come', async () => {
+	const { code, timeline } = await blocksSession(24, 5, false, { answer: { 69: [[58, [3, 4]]] }, later: [[175, 200, 2, [0, 0, 0, 3]]] });
+	assert.deepEqual([code, timeline], [0, [193, 1, 4, 69, 175, '<2', 113]]);
+});
+
+test('with --blocks a chat line without RIFTAL_ does not end the session, and it fails at its deadline', async () => {
+	const { code, sent, lines } = await blocksSession(24, 1, false, { answer: { 113: [[9, 'fixture chat']] } });
+	assert.deepEqual([code, sent.map((p) => p.id)], [1, [193, 1, 4, 69, 175, 113]]);
+	assert.match(lines.at(-1), /^tracer: missing blocks-pack's RIFTAL_ chat line$/);
+});
+
+// The chat line comes 3 s after SetLocalPlayerAsInitialized, so more than 2 s after the
+// WANTED packets, and another chat line comes before it.
+test('with --blocks the session outlasts the WANTED packets by more than 2 s and ends on the pack\'s chat line', async () => {
+	const { code, timeline, lines } = await blocksSession(24, 10, false, { answer: { 113: [[9, 'fixture chat']] }, later: [[113, 3000, 9, 'RIFTAL_DONE']] });
+	assert.deepEqual([code, timeline], [0, [193, 1, 4, 69, 175, 113, '<9']]);
+	assert.ok(lines.includes('9\tTextPacket\t2 packets'));
 });
 
 test('a capture record is the ID, the length, then the packet, and arguments need both paths', () => {

@@ -36,6 +36,20 @@ const LICENCES = ['MIT', 'ISC', 'BSD-2-Clause', 'BSD-3-Clause', 'Apache-2.0', 'M
 const NET_PREFIX = 'riftal_smoke_bds_net_';
 const ISOLATED = 'com.docker.network.bridge.gateway_mode_ipv4';
 
+// Root CLAUDE.md "The BDS job" admits BDS on the runners only for the 1.26.70 update's
+// Stage 3 runs under pmmp-updater#10: the target on either channel, and on release the two
+// builds the steward's ruling compares it with (issuecomment-6868986975), 1.26.60.6 for the
+// old palette and 1.26.63.1 for item e's control. Any other build there pulls CI off the
+// host, so it is refused before anything is fetched, whether named or read from the links.
+const STAGE3 = { release: /^1\.26\.(?:70\.\d+|60\.6|63\.1)$/, preview: /^1\.26\.70\.\d+$/ };
+
+function stage3Build(build) {
+	const file = `bedrock-server-${build.build}.zip`;
+	const ok = STAGE3[build.channel] && STAGE3[build.channel].test(String(build.build)) && build.file === file && String(build.url).endsWith(`/${file}`);
+	if (!ok) throw new Error(`BDS ${JSON.stringify(build.build)} on ${build.channel} is not a Stage 3 build of #10: 1.26.70.<n>, or 1.26.60.6 or 1.26.63.1 on release`);
+	return build;
+}
+
 const digest = (algo, body) => crypto.createHash(algo).update(body).digest('hex');
 
 // The cached file is checked on every run, and a download is renamed into place only once
@@ -175,7 +189,7 @@ async function onIsolatedNetwork(cmd, name, container, log, start) {
 }
 
 async function fetchInputs(build, cacheDir, log) {
-	await inspect.download(build, cacheDir, log);
+	await inspect.download(stage3Build(build), cacheDir, log);
 	await nodeTarball(cacheDir, log);
 	await npmTarballs(cacheDir, log);
 }
@@ -192,7 +206,7 @@ async function main(argv, log = (s) => process.stdout.write(`${s}\n`), { seconds
 	if ('sha256' in own && !/^[0-9a-f]{64}$/.test(own.sha256)) throw new Error('--sha256 must be 64 lowercase hex digits');
 	const a = inspect.parseArgs(rest);
 	if (own.build && a.links_file) throw new Error('--build and --links-file name the build twice');
-	const build = own.build ? inspect.namedBuild(own.build, a.channel) : inspect.selectBuild(await inspect.readLinks(a), a.channel);
+	const build = stage3Build(own.build ? inspect.namedBuild(own.build, a.channel) : inspect.selectBuild(await inspect.readLinks(a), a.channel));
 	if (own.sha256) build.sha256 = own.sha256;
 	const out = path.join(a.cache, 'captures', build.build);
 	const me = os.userInfo();
@@ -229,4 +243,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { SECONDS, NODE, pinnedFile, nodeTarball, lockProblems, npmTarballs, dockerArgs, trapSignals, timed, main };
+module.exports = { SECONDS, NODE, stage3Build, pinnedFile, nodeTarball, lockProblems, npmTarballs, dockerArgs, trapSignals, timed, fetchInputs, main };

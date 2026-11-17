@@ -99,10 +99,65 @@ for (const bedrockCipher of [false, true]) {
 	});
 }
 
+// A server stood in for with --blocks: StartGamePacket of unique ID -3 and runtime ID 7,
+// then chunk -2, 2, whose sub-chunk request is answered with `entries` entries. With
+// `late`, VoxelShapesPacket comes only once the client has been quiet for longer than
+// QUIET, here 50 ms.
+async function blocksSession(entries, deadline, late = false) {
+	const ids = Object.fromEntries([['LoginPacket', 1], ['PlayStatusPacket', 2], ['ServerToClientHandshakePacket', 3], ['ClientToServerHandshakePacket', 4], ['TextPacket', 9], ['LevelChunkPacket', 58], ['RequestChunkRadiusPacket', 69], ['SetLocalPlayerAsInitializedPacket', 113], ['NetworkSettingsPacket', 143], ['SubChunkPacket', 174], ['SubChunkRequestPacket', 175], ['RequestNetworkSettingsPacket', 193], ...t.WANTED.map((n, i) => [n, n === 'StartGamePacket' ? 11 : 300 + i])]);
+	const out = fs.mkdtempSync(path.join(os.tmpdir(), 'tracer-'));
+	fs.writeFileSync(path.join(out, 'info.json'), JSON.stringify({ version: INFO.version, packets: ids }));
+	const token = t.jwt({ salt: 'AAAA' }, t.makeKeys());
+	const pk = (id, bytes) => Buffer.concat([t.varint(id), Buffer.from(bytes)]);
+	const voxels = pk(ids.VoxelShapesPacket, []);
+	const answers = {
+		1: [pk(3, Buffer.concat([t.varint(token.length), Buffer.from(token)]))],
+		4: [pk(11, [5, 7]), ...t.WANTED.slice(1).map((n) => pk(ids[n], [])).filter((p) => !(late && p.equals(voxels)))],
+		69: [pk(58, [3, 4]), pk(2, [0, 0, 0, 3])],
+		175: [pk(174, [0, 0, ...Array(12).fill(0), entries])],
+		113: [pk(9, 'RIFTAL_DONE')],
+	};
+	const [sent, lines, state] = [[], [], { compressed: true }];
+	let deliver = null;
+	const send = (batch) => {
+		const [p] = sent.length ? t.decodeBatch(batch, state) : [{ id: 193 }];
+		sent.push(p);
+		setImmediate(() => deliver(sent.length === 1 ? t.encodeBatch([t.varint(143)], {}) : t.encodeBatch(answers[p.id] || [], state)));
+		if (late && p.id === 175) setTimeout(() => deliver(t.encodeBatch([voxels], state)), 200);
+	};
+	const code = await t.trace({ protocol_info: path.join(out, 'info.json'), out, port: 19132, deadline, blocks: true, quiet: 50 }, (s) => lines.push(s), { send, close() {}, open: async (m) => { deliver = m; } });
+	return { code, sent, lines, ids, pk };
+}
+
+test('with --blocks it asks for each chunk\'s sub-chunks, says it is initialised once all are answered, and ends on the pack\'s chat line', async () => {
+	const { code, sent, lines, ids, pk } = await blocksSession(24, 10);
+	assert.deepEqual([code, sent.map((p) => p.id)], [0, [193, 1, 4, 69, 175, 113]]);
+	assert.deepEqual(sent[3].packet, pk(69, [12, 6]));
+	assert.deepEqual(sent[4].packet, t.subChunkRequest(ids, Buffer.from([3, 4])));
+	assert.deepEqual([...sent[4].packet.subarray(2, 7)], [0, 24, 0, 0xfc, 0]);
+	assert.deepEqual([...sent[4].packet.subarray(-15, -12)], [0, 19, 0]);
+	assert.deepEqual([...sent[4].packet.subarray(-12)], [254, 255, 255, 255, 0, 0, 0, 0, 2, 0, 0, 0]);
+	assert.deepEqual(sent[5].packet, pk(113, [7]));
+	assert.ok(lines.includes('174\tSubChunkPacket\t1 packets'));
+	assert.equal(t.subChunkCount(Buffer.from([1, 0x81, 0x01, ...Array(12).fill(0), 0x96, 0x01])), 150);
+});
+
+test('with --blocks a sub-chunk left unanswered keeps the pack from starting, and the session fails at its deadline', async () => {
+	const { code, sent, lines } = await blocksSession(23, 1);
+	assert.deepEqual([code, sent.map((p) => p.id)], [1, [193, 1, 4, 69, 175]]);
+	assert.match(lines.at(-1), /^tracer: missing blocks-pack's RIFTAL_ chat line$/);
+});
+
+test('with --blocks a WANTED packet that comes after the sub-chunks still lets it say it is initialised', async () => {
+	const { code, sent } = await blocksSession(24, 3, true);
+	assert.deepEqual([code, sent.map((p) => p.id)], [0, [193, 1, 4, 69, 175, 113]]);
+});
+
 test('a capture record is the ID, the length, then the packet, and arguments need both paths', () => {
 	const capture = t.encodeCapture([{ id: 0x1a2, packet: Buffer.from('ab') }, { id: 11, packet: Buffer.alloc(0) }]);
 	assert.deepEqual(capture, Buffer.from([0x01, 0xa2, 0, 0, 0, 2, 0x61, 0x62, 0, 11, 0, 0, 0, 0]));
-	assert.deepEqual(t.parseArgs(['--protocol-info', 'p.json', '--out', '/o']), { protocol_info: 'p.json', out: '/o', port: 19132, deadline: 90, transport: 'nethernet' });
+	assert.deepEqual(t.parseArgs(['--protocol-info', 'p.json', '--out', '/o']), { protocol_info: 'p.json', out: '/o', port: 19132, deadline: 90, transport: 'nethernet', blocks: false });
+	assert.equal(t.parseArgs(['--protocol-info', 'p', '--out', '/o', '--blocks']).blocks, true);
 	assert.equal(t.parseArgs(['--protocol-info', 'p', '--out', '/o', '--transport', 'raknet']).transport, 'raknet');
 	assert.throws(() => t.parseArgs(['--protocol-info', 'p', '--out', '/o', '--transport', 'quic']), /nethernet or raknet/);
 	assert.throws(() => t.parseArgs(['--out', '/o']), /required/);

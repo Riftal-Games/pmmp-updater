@@ -9,7 +9,10 @@
 // laid out as packages/bedrock-protocol encodes it.
 //
 // Usage: node tracer.js --protocol-info <json> --out <dir> [--port <n>] [--deadline <seconds>]
-//   [--transport nethernet|raknet]
+//   [--transport nethernet|raknet] [--blocks]
+// With --blocks, for blocks-pack, it asks for a chunk radius of RADIUS and for every
+// sub-chunk of each chunk sent, says it is initialised once all are answered and QUIET ms
+// pass without a join packet, and ends 2 s after the pack's chat line naming RIFTAL_.
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -25,6 +28,11 @@ const NAME = 'PmmpUpdater';
 const DEVICE_OS = 15;
 // Every packet ADR 002 sources a BedrockData file from. The session ends once all arrived.
 const WANTED = ['StartGamePacket', 'ItemRegistryPacket', 'CreativeContentPacket', 'CraftingDataPacket', 'BiomeDefinitionListPacket', 'AvailableActorIdentifiersPacket', 'JigsawStructureDataPacket', 'VoxelShapesPacket'];
+// blocks-pack sets its blocks in chunks at most 3.6 chunks from the spawn's.
+const RADIUS = 6;
+const QUIET = 5000;
+// The overworld's sub-chunks, y -4 to 19.
+const SUB_CHUNKS = 24;
 
 function varint(n) {
 	const out = [];
@@ -144,10 +152,27 @@ function encodeCapture(records) {
 	return Buffer.concat(records.flatMap(({ id, packet }) => [Buffer.from([id >> 8, id & 0xff]), u32(packet.length), packet]));
 }
 
+// A SubChunkRequestPacket for the overworld sub-chunks y -4 to 19 of the chunk a
+// LevelChunkPacket payload names: the dimension, the y offsets from the base, then the
+// base, the chunk's x and z at sub-chunk y 0.
+function subChunkRequest(ids, chunk) {
+	const zigzag = (u) => (u % 2 ? -(u + 1) / 2 : u / 2);
+	const [x, at] = readVarint(chunk, 0);
+	const base = Buffer.alloc(12);
+	base.writeInt32LE(zigzag(x));
+	base.writeInt32LE(zigzag(readVarint(chunk, at)[0]), 8);
+	const offsets = Array.from({ length: SUB_CHUNKS }, (_, i) => Buffer.from([0, (i - 4) & 0xff, 0]));
+	return Buffer.concat([varint(ids.SubChunkRequestPacket), varint(0), varint(offsets.length), ...offsets, base]);
+}
+
+// The number of entries a SubChunkPacket payload answers with, which follows the cache
+// flag, the dimension and the base position.
+const subChunkCount = (p) => readVarint(p, readVarint(p, 1)[1] + 12)[0];
+
 function parseArgs(args) {
-	const { values: v } = util.parseArgs({ args, strict: true, options: { 'protocol-info': { type: 'string' }, out: { type: 'string' }, port: { type: 'string', default: '19132' }, deadline: { type: 'string', default: '90' }, transport: { type: 'string', default: 'nethernet' } } });
+	const { values: v } = util.parseArgs({ args, strict: true, options: { 'protocol-info': { type: 'string' }, out: { type: 'string' }, port: { type: 'string', default: '19132' }, deadline: { type: 'string', default: '90' }, transport: { type: 'string', default: 'nethernet' }, blocks: { type: 'boolean', default: false } } });
 	if (!v['protocol-info'] || !v.out) throw new Error('--protocol-info and --out are required');
-	const a = { protocol_info: v['protocol-info'], out: v.out, port: Number(v.port), deadline: Number(v.deadline), transport: v.transport };
+	const a = { protocol_info: v['protocol-info'], out: v.out, port: Number(v.port), deadline: Number(v.deadline), transport: v.transport, blocks: v.blocks };
 	if (!(a.port > 0 && a.port < 65536) || !(a.deadline > 0)) throw new Error('--port and --deadline must be positive numbers');
 	if (!['nethernet', 'raknet'].includes(a.transport)) throw new Error('--transport must be nethernet or raknet');
 	return a;
@@ -160,17 +185,24 @@ function trace(a, log, transport) {
 	const keys = makeKeys();
 	const state = { compressed: false, cipher: null };
 	const records = [];
+	const wanted = () => WANTED.every((n) => records.some((r) => r.id === ids[n]));
+	const blocks = { pending: 0, spawned: false, initialised: false, done: false, quiet: null, runtime: 0 };
+	// Every packet that can change whether --blocks is ready to say it is initialised.
+	const join = new Set([ids.LevelChunkPacket, ids.SubChunkPacket, ids.PlayStatusPacket, ...WANTED.map((n) => ids[n])]);
 	const link = transport || (a.transport === 'raknet' ? raknet.transport(a.port) : nethernet.transport({ port: a.port, info, keys, log }));
 	return new Promise((resolve) => {
 		let done = false;
 		const finish = (error) => {
 			if (done) return;
 			done = true;
-			clearTimeout(deadline); link.close();
+			clearTimeout(deadline); clearTimeout(blocks.quiet); link.close();
 			fs.writeFileSync(path.join(a.out, 'capture.bin.part'), encodeCapture(records));
 			fs.renameSync(path.join(a.out, 'capture.bin.part'), path.join(a.out, 'capture.bin'));
-			for (const r of records) log(`${r.id}\t${names.get(r.id) || '?'}\t${r.packet.length}`);
+			// A --blocks session carries thousands of block updates, so it logs a count per ID.
+			if (a.blocks) for (const [id, rs] of Map.groupBy(records, (r) => r.id)) log(`${id}\t${names.get(id) || '?'}\t${rs.length} packets`);
+			else for (const r of records) log(`${r.id}\t${names.get(r.id) || '?'}\t${r.packet.length}`);
 			const missing = WANTED.filter((n) => !records.some((r) => r.id === ids[n]));
+			if (a.blocks && !blocks.done) missing.push('blocks-pack\'s RIFTAL_ chat line');
 			if (error || missing.length) log(`tracer: ${error ? error.message : `missing ${missing.join(', ')}`}`);
 			resolve(error || missing.length ? 1 : 0);
 		};
@@ -179,6 +211,7 @@ function trace(a, log, transport) {
 		const onPacket = ({ id, packet }) => {
 			records.push({ id, packet });
 			const payload = packet.subarray(readVarint(packet, 0)[1]);
+			if (id === ids.PlayStatusPacket && payload.readUInt32BE(0) === 3) blocks.spawned = true;
 			if (id === ids.NetworkSettingsPacket) {
 				state.compressed = true;
 				game(loginPacket(ids, info, keys, a.port));
@@ -194,8 +227,30 @@ function trace(a, log, transport) {
 			} else if (id === ids.ResourcePacksInfoPacket || id === ids.ResourcePackStackPacket) {
 				const [ordinal, value] = id === ids.ResourcePacksInfoPacket ? [2, 'downloadingfinished'] : [3, 'resourcepackstackfinished'];
 				game(Buffer.concat([varint(ids.ResourcePackClientResponsePacket), varint(ordinal), varint(value.length), Buffer.from(value)]));
+			} else if (a.blocks && id === ids.StartGamePacket) {
+				// The actor runtime ID follows the actor unique ID, a varlong skipped here.
+				let at = 0;
+				while (payload[at++] & 0x80);
+				blocks.runtime = readVarint(payload, at)[0];
+				game(Buffer.concat([varint(ids.RequestChunkRadiusPacket), varint(2 * RADIUS), Buffer.from([RADIUS])]));
+			} else if (a.blocks && id === ids.LevelChunkPacket) {
+				blocks.pending += SUB_CHUNKS;
+				game(subChunkRequest(ids, payload));
+			} else if (a.blocks && id === ids.SubChunkPacket) {
+				blocks.pending -= subChunkCount(payload);
+			} else if (a.blocks && id === ids.TextPacket && packet.includes('RIFTAL_') && !blocks.done) {
+				blocks.done = true;
+				setTimeout(() => finish(), 2000);
 			}
-			if (WANTED.every((n) => records.some((r) => r.id === ids[n]))) setTimeout(() => finish(), 2000);
+			if (!a.blocks && wanted()) setTimeout(() => finish(), 2000);
+			if (a.blocks && !blocks.initialised && join.has(id)) {
+				clearTimeout(blocks.quiet);
+				blocks.quiet = setTimeout(() => {
+					if (!blocks.spawned || blocks.pending > 0 || !wanted()) return;
+					blocks.initialised = true;
+					game(Buffer.concat([varint(ids.SetLocalPlayerAsInitializedPacket), varint(blocks.runtime)]));
+				}, a.quiet || QUIET);
+			}
 		};
 		link.open((m) => decodeBatch(m, state).forEach(onPacket), finish)
 			.then(() => game(Buffer.concat([varint(ids.RequestNetworkSettingsPacket), u32(info.version.protocol_version)])))
@@ -205,4 +260,4 @@ function trace(a, log, transport) {
 
 if (require.main === module) trace(parseArgs(process.argv.slice(2)), (s) => process.stdout.write(`${s}\n`)).then((code) => { process.exitCode = code; });
 
-module.exports = { WANTED, varint, readVarint, Cipher, encodeBatch, decodeBatch, makeKeys, jwt, loginPacket, sessionKey, encodeCapture, parseArgs, trace };
+module.exports = { WANTED, varint, readVarint, Cipher, encodeBatch, decodeBatch, makeKeys, jwt, loginPacket, sessionKey, encodeCapture, subChunkRequest, subChunkCount, parseArgs, trace };

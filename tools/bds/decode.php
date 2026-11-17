@@ -77,6 +77,20 @@ for($at = 0; $at < strlen($data); $at += 6 + $len){
 		$out['unknown'][] = $id;
 		continue;
 	}
+	// Every block update in the order sent, as x, y, z, block network ID, flags and layer.
+	// UpdateSubChunkBlocksPacket carries several in one sub-chunk, on either layer.
+	if($pk instanceof P\UpdateBlockPacket || $pk instanceof P\UpdateSubChunkBlocksPacket){
+		$pk->decode($in = new ByteBufferReader($raw));
+		$in->getOffset() === $len or throw new RuntimeException("{$pk->getName()} decodes {$in->getOffset()} of its $len bytes");
+		$updates = $pk instanceof P\UpdateBlockPacket ? [[$pk->blockPosition, $pk->blockRuntimeId, $pk->flags, $pk->dataLayerId]] : [
+			...array_map(fn($e) => [$e->getBlockPosition(), $e->getBlockRuntimeId(), $e->getFlags(), 0], $pk->getLayer0Updates()),
+			...array_map(fn($e) => [$e->getBlockPosition(), $e->getBlockRuntimeId(), $e->getFlags(), 1], $pk->getLayer1Updates()),
+		];
+		foreach($updates as [$p, $block, $flags, $layer]){
+			$out['block_updates'][] = [$p->getX(), $p->getY(), $p->getZ(), $block, $flags, $layer];
+		}
+		continue;
+	}
 	if(($key = $keys[$pk::class] ?? null) === null){
 		continue;
 	}

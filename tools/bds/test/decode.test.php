@@ -143,10 +143,23 @@ foreach(new RecursiveIteratorIterator(new RecursiveDirectoryIterator("$protocol/
 [$status, , $err] = $decode($capture, "$tmp/without");
 $check($status !== 0 && str_contains($err, "LogicException: pocketmine\\network\\mcpe\\protocol\\VoxelShapesPacket is not in $tmp/without"), 'a class missing from the package throws', "exit $status, $err");
 
+// Block updates, alone and as a sub-chunk's on both layers, are each kept in the order sent,
+// however often the same one comes.
+$update = P\UpdateBlockPacket::create(new T\BlockPosition(1, -2, 3), 23959, P\UpdateBlockPacket::FLAG_NETWORK, P\UpdateBlockPacket::DATA_LAYER_NORMAL);
+$entry = fn(int $id) => new T\UpdateSubChunkBlocksPacketEntry(new T\BlockPosition(-4, 5, 6), $id, 3, 0, 0);
+$updates = $record($update) . $record(P\UpdateSubChunkBlocksPacket::create(new T\BlockPosition(-16, 0, 0), [$entry(7)], [$entry(8)])) . $record($update);
+[$status, $out, $err] = $decode($updates, $protocol);
+$check($status === 0 && (json_decode($out, true)['block_updates'] ?? null) === [[1, -2, 3, 23959, 2, 0], [-4, 5, 6, 7, 3, 0], [-4, 5, 6, 8, 3, 1], [1, -2, 3, 23959, 2, 0]], 'block updates are kept in order with their layer', "exit $status, $out, $err");
+$liquid = P\UpdateBlockPacket::create(new T\BlockPosition(1, -2, 3), 23960, P\UpdateBlockPacket::FLAG_NETWORK, P\UpdateBlockPacket::DATA_LAYER_LIQUID);
+[$status, $out, $err] = $decode($record($update) . $record($liquid), $protocol);
+$check($status === 0 && (json_decode($out, true)['block_updates'] ?? null) === [[1, -2, 3, 23959, 2, 0], [1, -2, 3, 23960, 2, 1]], 'an UpdateBlockPacket on the liquid layer keeps layer 1', "exit $status, $out, $err");
+
 foreach([
 	'runs past the end of the capture' => substr($capture, 0, -1),
 	'the capture holds JigsawStructureDataPacket twice' => $capture . $record($jigsaw),
 	'JigsawStructureDataPacket decodes 33 of its 34 bytes' => $record($jigsaw, "\x00"),
+	'UpdateBlockPacket decodes 9 of its 10 bytes' => $record($update, "\x00"),
+	'UpdateSubChunkBlocksPacket decodes 14 of its 15 bytes' => $record(P\UpdateSubChunkBlocksPacket::create(new T\BlockPosition(0, 0, 0), [$entry(7)], []), "\x00"),
 ] as $message => $bad){
 	[$status, , $err] = $decode($bad, $protocol);
 	$check($status !== 0 && str_contains($err, $message), "a capture it cannot account for stops it: $message", "exit $status, $err");

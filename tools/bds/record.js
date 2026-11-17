@@ -7,8 +7,9 @@
 // port: BDS from the read-only cache mount, tracer.js beside it in the same container on
 // the chosen transport, the capture written to <cache>/captures/<build>/capture.bin.
 //
-// Usage: node tools/bds/record.js [--channel release|preview] [--links-file <json>]
-//   [--cache <dir>] [--docker <command>] [--transport nethernet|raknet] [--dry-run]
+// Usage: node tools/bds/record.js [--channel release|preview] [--links-file <json> | --build <version>]
+//   [--sha256 <hex>] [--cache <dir>] [--docker <command>] [--transport nethernet|raknet] [--dry-run]
+// --build names a version in place of the one the links offer; --sha256 pins its zip.
 //
 // Run it where docker is local, as inspect.js says.
 
@@ -34,6 +35,20 @@ const LOCK = require('./package-lock.json');
 const LICENCES = ['MIT', 'ISC', 'BSD-2-Clause', 'BSD-3-Clause', 'Apache-2.0', 'MPL-2.0'];
 const NET_PREFIX = 'riftal_smoke_bds_net_';
 const ISOLATED = 'com.docker.network.bridge.gateway_mode_ipv4';
+
+// Root CLAUDE.md "The BDS job" admits BDS on the runners only for the 1.26.70 update's
+// Stage 3 runs under pmmp-updater#10: the target on either channel, and on release the two
+// builds the steward's ruling compares it with (issuecomment-6868986975), 1.26.60.6 for the
+// old palette and 1.26.63.1 for item e's control. Any other build there pulls CI off the
+// host, so it is refused before anything is fetched, whether named or read from the links.
+const STAGE3 = { release: /^1\.26\.(?:70\.\d+|60\.6|63\.1)$/, preview: /^1\.26\.70\.\d+$/ };
+
+function stage3Build(build) {
+	const file = `bedrock-server-${build.build}.zip`;
+	const ok = STAGE3[build.channel] && STAGE3[build.channel].test(String(build.build)) && build.file === file && String(build.url).endsWith(`/${file}`);
+	if (!ok) throw new Error(`BDS ${JSON.stringify(build.build)} on ${build.channel} is not a Stage 3 build of #10: 1.26.70.<n>, or 1.26.60.6 or 1.26.63.1 on release`);
+	return build;
+}
 
 const digest = (algo, body) => crypto.createHash(algo).update(body).digest('hex');
 
@@ -174,20 +189,28 @@ async function onIsolatedNetwork(cmd, name, container, log, start) {
 }
 
 async function fetchInputs(build, cacheDir, log) {
-	await inspect.download(build, cacheDir, log);
+	await inspect.download(stage3Build(build), cacheDir, log);
 	await nodeTarball(cacheDir, log);
 	await npmTarballs(cacheDir, log);
 }
 
 async function main(argv, log = (s) => process.stdout.write(`${s}\n`), { seconds = SECONDS, fetchAll = fetchInputs } = {}) {
-	const at = argv.indexOf('--transport');
-	const transport = at < 0 ? 'nethernet' : argv[at + 1];
-	if (!['nethernet', 'raknet'].includes(transport)) throw new Error('--transport must be nethernet or raknet');
-	const a = inspect.parseArgs(at < 0 ? argv : [...argv.slice(0, at), ...argv.slice(at + 2)]);
-	const build = inspect.selectBuild(await inspect.readLinks(a), a.channel);
+	const own = { transport: 'nethernet' };
+	const rest = [];
+	for (let i = 0; i < argv.length; i++) {
+		if (!['--transport', '--build', '--sha256'].includes(argv[i])) rest.push(argv[i]);
+		else if (argv[i + 1] === undefined || argv[i + 1].startsWith('--')) throw new Error(`${argv[i]} needs a value`);
+		else own[argv[i].slice(2)] = argv[++i];
+	}
+	if (!['nethernet', 'raknet'].includes(own.transport)) throw new Error('--transport must be nethernet or raknet');
+	if ('sha256' in own && !/^[0-9a-f]{64}$/.test(own.sha256)) throw new Error('--sha256 must be 64 lowercase hex digits');
+	const a = inspect.parseArgs(rest);
+	if (own.build && a.links_file) throw new Error('--build and --links-file name the build twice');
+	const build = stage3Build(own.build ? inspect.namedBuild(own.build, a.channel) : inspect.selectBuild(await inspect.readLinks(a), a.channel));
+	if (own.sha256) build.sha256 = own.sha256;
 	const out = path.join(a.cache, 'captures', build.build);
 	const me = os.userInfo();
-	const run = dockerArgs(build, a.cache, out, `${me.uid}:${me.gid}`, transport);
+	const run = dockerArgs(build, a.cache, out, `${me.uid}:${me.gid}`, own.transport);
 	const [container, net] = ['--name', '--network'].map((k) => run[run.indexOf(k) + 1]);
 	const args = ['--kill-after=10', String(seconds), a.docker, ...run];
 	log(`BDS Linux ${build.channel} ${build.build}: ${build.url}`);
@@ -220,4 +243,4 @@ if (require.main === module) {
 	});
 }
 
-module.exports = { SECONDS, NODE, pinnedFile, nodeTarball, lockProblems, npmTarballs, dockerArgs, trapSignals, timed, main };
+module.exports = { SECONDS, NODE, stage3Build, pinnedFile, nodeTarball, lockProblems, npmTarballs, dockerArgs, trapSignals, timed, fetchInputs, main };

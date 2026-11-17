@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
 const fx = require('../../test-support/fixtures');
 const inspect = require('../inspect');
@@ -61,6 +63,38 @@ test('a links layout or URL it does not recognise fails instead of downloading',
 	assert.throws(() => inspect.selectBuild(withLink('serverBedrockLinux', 'https://www.minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.26.61.1.zip'), 'release'), /not a minecraft\.net Linux BDS zip/);
 	assert.throws(() => inspect.selectBuild(withLink('serverBedrockLinux', 'https://www.minecraft.net/bedrockdedicatedserver/bin-linux/../evil/bedrock-server-1.26.61.1.zip'), 'release'), /not a minecraft\.net Linux BDS zip/);
 	assert.throws(() => inspect.selectBuild(withLink('serverBedrockLinux', 'https://www.minecraft.net/bedrockdedicatedserver/bin-linux-preview/bedrock-server-1.26.70.22.zip'), 'release'), /points at a preview build/);
+});
+
+test('a build named by version gets the URL the links would give it, and only four numbers are accepted', () => {
+	assert.deepEqual(inspect.namedBuild('1.26.63.1', 'release'), {
+		channel: 'release',
+		build: '1.26.63.1',
+		url: 'https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.63.1.zip',
+		file: 'bedrock-server-1.26.63.1.zip',
+	});
+	assert.equal(inspect.namedBuild('1.26.70.24', 'preview').url, 'https://www.minecraft.net/bedrockdedicatedserver/bin-linux-preview/bedrock-server-1.26.70.24.zip');
+	for (const bad of ['1.26.63', '1.26.63.1/../x', 'latest', '']) assert.throws(() => inspect.namedBuild(bad, 'release'), /four numbers/, bad);
+});
+
+const zip = (s) => Buffer.concat([Buffer.from('PK\x03\x04', 'binary'), Buffer.from(s)]);
+const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+const serveZip = (body) => async () => ({ ok: true, status: 200, headers: { get: () => String(body.length) }, arrayBuffer: async () => body });
+const BUILD = { channel: 'release', build: '9.8.7.6', url: 'https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-9.8.7.6.zip', file: 'bedrock-server-9.8.7.6.zip' };
+
+test('a BDS zip is logged with its sha256, and with a pin any other zip is refused, downloaded or cached', async (t) => {
+	t.mock.method(globalThis, 'fetch', () => assert.fail('a test never reaches minecraft.net'));
+	const body = zip('synthetic server');
+	const dir = fx.tempDir('bds-zip');
+	const dest = path.join(dir, BUILD.file);
+	const lines = [];
+	await assert.rejects(inspect.download({ ...BUILD, sha256: sha(zip('other')) }, dir, () => {}, serveZip(body)), new RegExp(`sha256 ${sha(body)}, expected ${sha(zip('other'))}`));
+	assert.ok(!fs.existsSync(dest) && !fs.existsSync(`${dest}.part`));
+	assert.equal(await inspect.download({ ...BUILD, sha256: sha(body) }, dir, (s) => lines.push(s), serveZip(body)), dest);
+	assert.equal(lines.at(-1), `saved ${dest}, ${body.length} bytes, sha256 ${sha(body)}`);
+	await inspect.download(BUILD, dir, (s) => lines.push(s), () => assert.fail('a cached zip is not downloaded again'));
+	assert.equal(lines.at(-1), `cached ${dest}, sha256 ${sha(body)}`);
+	fs.writeFileSync(dest, zip('tampered'));
+	await assert.rejects(inspect.download({ ...BUILD, sha256: sha(body) }, dir, () => {}, () => assert.fail('not downloaded')), /sha256 [0-9a-f]{64}, expected/);
 });
 
 test('the container is the pinned ubuntu:24.04, limited, with both mounts read-only and no port', () => {

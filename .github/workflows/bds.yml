@@ -1,0 +1,70 @@
+name: BDS
+
+# Stage 3 of the 1.26.70 update (pmmp-updater#10) runs Mojang's dedicated server here,
+# under Nasir's exception for this job (issuecomment-6920397807) and the steward's terms
+# for it (issuecomment-6916686127). tools/bds/record.js runs BDS and tracer.js in one
+# container, capped by its -m and --cpus, alone on the internal network it creates in
+# this runner's sidecar, where run.sh refuses the session on any way off that network.
+# Nothing is published. BDS, its tools and its output stay under RUNNER_TEMP, removed
+# after every run, so nothing of Mojang's is committed, uploaded or kept.
+#
+# Started by hand only, so a run is always someone's choice of build. The pull_request
+# trigger exists so GitHub lists this workflow for a dispatch from a branch other than
+# main, and the job's if: skips it there.
+on:
+  workflow_dispatch:
+    inputs:
+      build:
+        description: BDS version, 1.26.70.<n> such as 1.26.70.22, or on release 1.26.60.6 or the control 1.26.63.1. tools/bds/record.js refuses any other
+        required: true
+        type: string
+      channel:
+        description: Release or preview BDS
+        type: choice
+        options: [release, preview]
+        default: release
+      sha256:
+        description: The zip's sha256, refused on any other. Empty runs on whatever downloads and logs its hash
+        type: string
+        default: ""
+  pull_request:
+    paths:
+      - .github/workflows/bds.yml
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    name: BDS session
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, riftal]
+    timeout-minutes: 30
+    # One BDS run at a time across the runners, and a queued one waits rather than
+    # stopping one already running.
+    concurrency:
+      group: bds
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Node version
+        run: |
+          node --version
+          node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'
+
+      - name: Record a session against BDS
+        env:
+          BUILD: ${{ inputs.build }}
+          CHANNEL: ${{ inputs.channel }}
+          SHA256: ${{ inputs.sha256 }}
+        run: |
+          set -- --build "$BUILD" --channel "$CHANNEL" --cache "$RUNNER_TEMP/bds"
+          if [ -n "$SHA256" ]; then set -- "$@" --sha256 "$SHA256"; fi
+          node tools/bds/record.js "$@"
+
+      - name: Remove BDS and its output
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/bds"

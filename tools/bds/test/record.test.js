@@ -6,9 +6,11 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const fx = require('../../test-support/fixtures');
+const inspect = require('../inspect');
 const record = require('../record');
 
-const LINKS = { result: { links: [{ downloadType: 'serverBedrockLinux', downloadUrl: 'https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-9.8.7.6.zip' }] } };
+const links = (type, url) => ({ result: { links: [{ downloadType: type, downloadUrl: url }] } });
+const LINKS = links('serverBedrockLinux', 'https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.70.22.zip');
 const BODY = Buffer.from('synthetic node tarball');
 const PIN = { file: 'node-v0.0.0-linux-x64.tar.gz', url: 'https://nodejs.invalid/node-v0.0.0-linux-x64.tar.gz', sha256: crypto.createHash('sha256').update(BODY).digest('hex') };
 const serve = (body) => async () => ({ ok: true, status: 200, arrayBuffer: async () => body });
@@ -59,12 +61,83 @@ test('a dry run names the capture path and runs docker under timeout', async () 
 	fx.writeTree(dir, { 'links.json': LINKS });
 	const lines = [];
 	assert.equal(await record.main(['--links-file', path.join(dir, 'links.json'), '--cache', path.join(dir, 'cache'), '--dry-run'], (s) => lines.push(s)), 0);
-	assert.equal(lines[1], `would write ${path.join(dir, 'cache', 'captures', '9.8.7.6', 'capture.bin')}`);
+	assert.equal(lines[1], `would write ${path.join(dir, 'cache', 'captures', '1.26.70.22', 'capture.bin')}`);
 	assert.match(lines[2], new RegExp(`^would run timeout --kill-after=10 ${record.SECONDS} docker run --rm .* nethernet$`));
 	const raknet = [];
 	await record.main(['--transport', 'raknet', '--links-file', path.join(dir, 'links.json'), '--dry-run'], (s) => raknet.push(s));
 	assert.match(raknet[2], / raknet$/);
 	await assert.rejects(record.main(['--transport', 'quic', '--dry-run']), /nethernet or raknet/);
+});
+
+test('--build names the BDS version without reading the links, and --sha256 pins its zip', async () => {
+	const dir = fx.tempDir('bds-record');
+	const lines = [];
+	assert.equal(await record.main(['--build', '1.26.63.1', '--cache', path.join(dir, 'cache'), '--dry-run'], (s) => lines.push(s)), 0);
+	assert.equal(lines[0], 'BDS Linux release 1.26.63.1: https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-1.26.63.1.zip');
+	assert.equal(lines[1], `would write ${path.join(dir, 'cache', 'captures', '1.26.63.1', 'capture.bin')}`);
+	const pin = 'ab'.repeat(32);
+	let fetched;
+	const stop = async (b) => { fetched = b; throw new Error('fetched'); };
+	await assert.rejects(record.main(['--channel', 'preview', '--build', '1.26.70.24', '--sha256', pin, '--cache', path.join(dir, 'cache')], () => {}, { fetchAll: stop }), /^Error: fetched$/);
+	assert.deepEqual(fetched, { ...inspect.namedBuild('1.26.70.24', 'preview'), sha256: pin });
+	await assert.rejects(record.main(['--build', '1.26.63.1', '--cache', path.join(dir, 'cache')], () => {}, { fetchAll: stop }), /^Error: fetched$/);
+	assert.ok(!('sha256' in fetched));
+	fx.writeTree(dir, { 'links.json': LINKS });
+	for (const [argv, why] of [
+		[['--build', '1.26.63.1', '--links-file', path.join(dir, 'links.json')], /--build and --links-file/],
+		[['--build'], /--build needs a value/],
+		[['--build', '--dry-run'], /--build needs a value/],
+		[['--build', '1.26'], /four numbers/],
+		[['--sha256', 'AB'.repeat(32)], /--sha256 must be 64 lowercase hex digits/],
+	]) await assert.rejects(record.main([...argv, '--dry-run'], () => {}, { fetchAll: stop }), why, argv.join(' '));
+});
+
+const STAGE3 = /is not a Stage 3 build of #10/;
+const BIN = 'https://www.minecraft.net/bedrockdedicatedserver/bin-linux';
+
+test('only 1.26.70.<n>, and on release 1.26.60.6 and 1.26.63.1, pass the Stage 3 check', () => {
+	for (const [v, channel] of [['1.26.70.0', 'release'], ['1.26.70.22', 'preview'], ['1.26.70.24', 'release'], ['1.26.60.6', 'release'], ['1.26.63.1', 'release']]) {
+		const b = inspect.namedBuild(v, channel);
+		assert.equal(record.stage3Build(b), b, `${v} ${channel}`);
+	}
+	for (const v of ['1.26.80.1', '1.26.7.1', '1.26.700.1', '11.26.70.1', '1.26.70', '1.26.70.', '1.26.60.5', '1.26.60.60', '1.26.63.10', '1.26.61.1', '1.26.70.1\n', '1.26.70.1 ', ' 1.26.70.1', '1.26.70.1a', '1x26.70.1', '', undefined]) {
+		const b = { channel: 'release', build: v, file: `bedrock-server-${v}.zip`, url: `${BIN}/bedrock-server-${v}.zip` };
+		assert.throws(() => record.stage3Build(b), STAGE3, JSON.stringify(v));
+	}
+	for (const v of ['1.26.60.6', '1.26.63.1']) assert.throws(() => record.stage3Build(inspect.namedBuild(v, 'preview')), STAGE3, `${v} preview`);
+	assert.throws(() => record.stage3Build({ ...inspect.namedBuild('1.26.70.22', 'release'), channel: 'beta' }), STAGE3);
+	const other = `${BIN}/bedrock-server-1.26.80.1.zip`;
+	assert.throws(() => record.stage3Build({ channel: 'release', build: '1.26.70.1', file: 'bedrock-server-1.26.80.1.zip', url: `${BIN}/bedrock-server-1.26.70.1.zip` }), STAGE3);
+	assert.throws(() => record.stage3Build({ channel: 'release', build: '1.26.70.1', file: 'bedrock-server-1.26.70.1.zip', url: other }), STAGE3);
+});
+
+test('record.js refuses any other build before it fetches, from --build, the links or a direct fetch', async () => {
+	const dir = fx.tempDir('bds-record');
+	let fetched = 0;
+	const stop = async () => { fetched++; throw new Error('fetched'); };
+	for (const v of ['1.26.80.1', '1.26.7.1', '1.26.700.1', '11.26.70.1', '1.26.70', '1.26.60.5', '1.26.70.1\n', '1.26.70.1 ']) {
+		await assert.rejects(record.main(['--build', v, '--cache', path.join(dir, 'cache')], () => {}, { fetchAll: stop }), /Stage 3 build|four numbers/, JSON.stringify(v));
+	}
+	for (const [file, channel] of [
+		[links('serverBedrockLinux', `${BIN}/bedrock-server-1.26.80.1.zip`), 'release'],
+		[links('serverBedrockLinux', `${BIN}/bedrock-server-1.26.60.5.zip`), 'release'],
+		[links('serverBedrockPreviewLinux', `${BIN}-preview/bedrock-server-1.26.63.1.zip`), 'preview'],
+		[links('serverBedrockPreviewLinux', `${BIN}-preview/bedrock-server-1.26.71.1.zip`), 'preview'],
+	]) {
+		fx.writeTree(dir, { 'links.json': file });
+		await assert.rejects(record.main(['--channel', channel, '--links-file', path.join(dir, 'links.json'), '--cache', path.join(dir, 'cache')], () => {}, { fetchAll: stop }), STAGE3, file.result.links[0].downloadUrl);
+	}
+	await assert.rejects(record.main(['--build', '1.26.80.1', '--dry-run']), STAGE3);
+	assert.equal(fetched, 0);
+	const real = globalThis.fetch;
+	globalThis.fetch = stop;
+	try {
+		await assert.rejects(record.fetchInputs(inspect.namedBuild('1.26.80.1', 'release'), path.join(dir, 'direct'), () => {}), STAGE3);
+	} finally {
+		globalThis.fetch = real;
+	}
+	assert.equal(fetched, 0);
+	assert.ok(!fs.existsSync(path.join(dir, 'direct')));
 });
 
 // A stand-in docker that logs each call and answers as the test asks, so every path
